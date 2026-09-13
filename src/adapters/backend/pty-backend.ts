@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import type { SessionBackend, SpawnOpts } from './types.js';
 import { logger } from '../../utils/logger.js';
 import { resolvePtyLaunch } from '../../utils/pty-launch.js';
+import { encodeWindowsPtyInput } from '../../utils/windows-pty-input.js';
 
 // npx may strip execute bits from prebuilt binaries — fix before first spawn.
 try {
@@ -50,7 +51,7 @@ export class PtyBackend implements SessionBackend {
 
   write(data: string): boolean {
     if (!this.process) return false;
-    this.process.write(data);
+    this.process.write(process.platform === 'win32' ? encodeWindowsPtyInput(data) : data);
     return true;
   }
 

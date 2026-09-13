@@ -87,7 +87,10 @@ describe('PTY launch and lifecycle', () => {
       writeFileSync(entry, `const fs = require('node:fs');
 fs.writeFileSync(process.env.RESULT, JSON.stringify({ args: process.argv.slice(2), owner: process.env.BOTMUX_OWNER_OPEN_ID, cwd: process.cwd() }));
 console.log('BOTMUX_READY');
-process.stdin.on('data', data => { if (data.toString().includes('ping')) { console.log('BOTMUX_PONG'); process.exit(0); } });
+process.stdin.setRawMode(true);
+process.stdin.setEncoding('utf8');
+let input = '';
+process.stdin.on('data', data => { input += data; if (input.includes('DONE')) { fs.writeFileSync(process.env.RESULT + '.input', input); console.log('BOTMUX_PONG'); process.exit(0); } });
 `);
       const batch = join(root, 'fixture.cmd');
       writeFileSync(batch, '@echo off\r\n"%_prog%" "%dp0%\\entry.cjs" %*\r\n');
@@ -96,6 +99,7 @@ process.stdin.on('data', data => { if (data.toString().includes('ping')) { conso
       const env = { ...process.env, PATH: `${dirname(process.execPath)}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH ?? ''}`, RESULT: result };
       let output = '';
       let wrote = false;
+      const input = '中文“引号”——→→ 😀😀 café\nDONE';
       try {
         await new Promise<void>((resolve, reject) => {
           const timeout = setTimeout(() => { backend.kill(); reject(new Error(`PTY timed out: ${output}`)); }, 12_000);
@@ -109,13 +113,14 @@ process.stdin.on('data', data => { if (data.toString().includes('ping')) { conso
               if (!wrote && output.includes('BOTMUX_READY')) {
                 wrote = true;
                 backend.resize(180, 35);
-                backend.write('ping\r');
+                backend.write(input);
               }
             });
             backend.onExit(code => { clearTimeout(timeout); code === 0 ? resolve() : reject(new Error(`PTY exited ${code}: ${output}`)); });
           } catch (error) { clearTimeout(timeout); reject(error); }
         });
         expect(output).toContain('BOTMUX_PONG');
+        expect(readFileSync(result + '.input', 'utf8')).toBe(input);
         expect(JSON.parse(readFileSync(result, 'utf8'))).toEqual({ args: argv, owner: 'test-owner', cwd: root });
       } finally { backend.kill(); }
       expect(backend.getChildPid()).toBeNull();

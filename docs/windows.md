@@ -14,8 +14,9 @@ Codex / Claude Code 共用的启动处理。Windows 默认使用 PTY，Linux/mac
 和 shell 特殊字符被改写。自定义 `.bat` / `.cmd`、PowerShell 脚本启动器暂不支持；
 可通过 `cliPathOverride` 指向原生可执行文件。
 
-这是开发中的原生适配，**尚未完成真实飞书消息到 CLI 再返回卡片的验收**。
-启动 smoke 只执行两个已安装 CLI 的 `--version`，不会调用模型。
+这是开发中的原生适配。已验证 **飞书私聊 → 原生 Codex CLI → 飞书文字回复**；
+Claude Code 的飞书完整链路仍待验证。版本 smoke 不调用模型；输入 smoke 只检查
+真实 Codex 输入框，不提交 prompt。
 Windows 上的完整单元测试套件、活跃 CLI 会话关闭时的进程清理、CLI hooks 和
 会话恢复仍需继续验证。PTY 会话不跨 daemon 重启存活；tmux /adopt、Unix 文件沙盒、
 Windows 单文件发行包和 Electron 安装包均不在本阶段支持范围。
@@ -33,6 +34,7 @@ bun run build
 bun run test -- test/windows-launch.test.ts test/executable.test.ts test/pty-backend-launch-shell.test.ts test/windows-stdin-encoding.test.ts test/backend-gate.test.ts
 node --test test/sync-upstream.test.mjs
 node scripts/smoke-windows-cli.mjs
+node scripts/smoke-windows-codex-input.mjs
 bun run windows:cli --help
 ```
 
@@ -42,9 +44,16 @@ Bun 只负责包管理和构建。实际测试中 Bun 1.4.2 的 ConPTY 路径会
 入口使用 Node 22.13+，确保 SQLite 引擎可用，并让后续 daemon/worker 使用同一个解释器。
 
 本机已验证 Codex `0.142.5`、Claude Code `2.1.201` 的真实 `--version` 启动和正常退出。
+实际模型调用使用 Codex `0.154.0`；旧的 `0.142.5` 调用 `gpt-6-astra` 时被服务端
+拒绝并要求升级。可独立安装新 CLI，通过机器人 `cliPathOverride` 指向它。
 版本检查、更新状态探测和 Codex 模型列表查询也复用同一 npm 启动器解析，
 避免 Windows 的 `execFile` 直接运行 `.cmd` 时返回 `EINVAL`。smoke 同时检查
 真实 CLI 的管道调用与 PTY 调用；FNM 的 POSIX 符号链接布局测试仅在 Linux 运行。
+
+ConPTY 输入为 BMP Unicode 字符发送显式 Win32 Unicode 按键，保留中文弯引号、
+破折号与箭头；连续字符发送按下/抬起事件，emoji 保留完整代理对。避免 native
+Codex 丢弃部分字符后，历史记录与原消息不一致而触发 `submit_unconfirmed`。
+Windows 会话提示使用 PowerShell 与 `botmux.cmd`，多行正文写 UTF-8 文件后发送。
 
 Windows 的 supervisor 通过本地命令队列轮询处理单机器人操作，通过绑定 PID 和
 启动时间的停止请求退出整组服务；自有 daemon/dashboard 子进程通过 Node IPC

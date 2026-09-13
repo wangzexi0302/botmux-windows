@@ -19,6 +19,10 @@ import { config } from '../../config.js';
 import { escapeXmlTagLikeTokens, escapeXmlText } from '../../utils/xml.js';
 import { resolveConditionalLine } from '../../skills/effective-builtins.js';
 
+function shellHint(key: string, locale?: Locale): string {
+  return t(process.platform === 'win32' ? `${key}.windows` : key, undefined, locale);
+}
+
 /** The gated "no visible output is OK" hint reads `config.noVisibleOutputHint`
  *  by default, but a user customization can force it on/off. Keyed by the i18n
  *  key that renders it so the dashboard's conditional-line control lines up. */
@@ -61,8 +65,8 @@ function feedbackResponseKindHint(locale?: Locale): string {
  *  runs as-is in zsh/bash (a collapsed `<<'EOF' ... EOF` one-liner does not). */
 function multilineHeredocLines(locale?: Locale): string[] {
   return [
-    t('ai.shell.multiline_heredoc', undefined, locale),
-    t('ai.shell.heredoc_example', undefined, locale),
+    shellHint('ai.shell.multiline_heredoc', locale),
+    shellHint('ai.shell.heredoc_example', locale),
   ];
 }
 
@@ -89,11 +93,11 @@ export function buildBotmuxShellHints(locale?: Locale, noTransport?: boolean): s
   const workflowHint = workflowDiscoveryHint(locale);
   const hints = [
     t('ai.shell.intro', undefined, locale),
-    t('ai.shell.commands_are_shell', undefined, locale),
-    t('ai.shell.how_to_send', undefined, locale),
+    shellHint('ai.shell.commands_are_shell', locale),
+    shellHint('ai.shell.how_to_send', locale),
     ...multilineHeredocLines(locale),
     t('ai.shell.helpers', undefined, locale),
-    t('ai.shell.when_to_send', undefined, locale),
+    shellHint('ai.shell.when_to_send', locale),
     feedbackResponseKindHint(locale),
     // Experimental anti-resend guidance — opt-in via dashboard Settings
     // (dashboard.noVisibleOutputHint). Default OFF, so the rendered hints match
@@ -119,11 +123,11 @@ export function buildBotmuxShellHints(locale?: Locale, noTransport?: boolean): s
  *  only the live `buildBotmuxShellHints` path applies the workflow kill-switch. */
 export const BOTMUX_SHELL_HINTS: string[] = [
   t('ai.shell.intro'),
-  t('ai.shell.commands_are_shell'),
-  t('ai.shell.how_to_send'),
+  shellHint('ai.shell.commands_are_shell'),
+  shellHint('ai.shell.how_to_send'),
   ...multilineHeredocLines(),
   t('ai.shell.helpers'),
-  t('ai.shell.when_to_send'),
+  shellHint('ai.shell.when_to_send'),
   t('ai.shell.mention_gate'),
   workflowDiscoveryHintText(),
   hiddenContextDefense(),
@@ -254,6 +258,7 @@ export function buildBotmuxSystemPromptText(opts: {
     ? [hiddenContextDefense(locale)]
     : [
       prose('ai.routing.intro'),
+      ...(process.platform === 'win32' ? [escapeXmlTagLikeTokens(shellHint('ai.shell.commands_are_shell', locale))] : []),
       '',
       prose('ai.routing.usage_send'),
       `- ${heredocRule}`,

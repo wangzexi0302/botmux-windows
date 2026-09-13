@@ -229,10 +229,10 @@ describe('claude-code buildArgs', () => {
     const idx = args.indexOf('--append-system-prompt');
     expect(idx).toBeGreaterThanOrEqual(0);
     const prompt = args[idx + 1];
-    expect(prompt).toContain("botmux send <<'EOF'");
+    expect(prompt).toContain(process.platform === 'win32' ? 'botmux.cmd send --no-mention --content-file' : "botmux send <<'EOF'");
     expect(prompt).toContain('第一行');
     expect(prompt).toContain('第二行');
-    expect(prompt).toContain('botmux send "第一行\\n第二行"');
+    expect(prompt).toContain(process.platform === 'win32' ? 'PowerShell' : 'botmux send "第一行\\n第二行"');
     expect(prompt).toContain('字面量');
     expect(prompt).toContain('JSON.stringify');
     expect(prompt).toContain('--content-file');
@@ -244,7 +244,7 @@ describe('claude-code buildArgs', () => {
     for (const prompt of [systemPrompt, shellHints]) {
       expect(prompt).toContain('JSON.stringify');
       expect(prompt).toContain('JSON-escaped text as a positional argument');
-      expect(prompt).toContain('literal `\\n` back into newlines');
+      expect(prompt).toContain(process.platform === 'win32' ? 'literal `\\n` instead of newlines' : 'literal `\\n` back into newlines');
       expect(prompt).toContain('--content-file');
     }
   });
