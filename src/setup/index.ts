@@ -98,11 +98,11 @@ export async function ensureDependencies(): Promise<DependenciesReport> {
   // loudly instead of pretending "常规对话不受影响" — that was true under the
   // old silent-fallback behavior and is now misleading.
   const tmux: TmuxResult = process.platform === 'win32'
-    ? { installed: false, freshInstall: false, binaryPresent: false, reason: '原生 Windows 使用 ConPTY；tmux 持久后端尚未验证。' }
+    ? { installed: false, freshInstall: false, binaryPresent: false, reason: '原生 Windows 使用 PTY 或 Zellij；tmux 持久后端尚未验证。' }
     : await ensureTmux(platform);
   const ptyOptIn = (process.env.BACKEND_TYPE ?? '').toLowerCase() === 'pty';
   if (process.platform === 'win32') {
-    console.log('✓ Windows 默认使用 ConPTY；会话不跨 daemon 重启存活，tmux /adopt 暂不可用。');
+    console.log('✓ Windows 原生终端：PTY 使用 ConPTY；Zellij 托管会话支持断开后重连。');
   } else if (tmux.installed) {
     if (!tmux.freshInstall) console.log(`✓ tmux ${tmux.version} (existing)`);
   } else if (ptyOptIn) {

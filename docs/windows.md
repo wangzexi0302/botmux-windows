@@ -18,11 +18,47 @@ Codex / Claude Code 共用的启动处理。Windows 默认使用 PTY，Linux/mac
 Claude Code 的飞书完整链路仍待验证。版本 smoke 不调用模型；输入 smoke 只检查
 真实 Codex 输入框，不提交 prompt。
 2026-09-13 本机 Claude Code 已登录，模型请求测试遇到服务端 HTTP 503，尚未取得成功响应。
-Windows 上的完整单元测试套件、活跃 CLI 会话关闭时的进程清理、CLI hooks 和
-会话恢复仍需继续验证。PTY 会话不跨 daemon 重启存活；tmux /adopt、Unix 文件沙盒、
+已加入原生 Zellij 托管会话后端，详见下节。Windows 上的完整单元测试套件、CLI hooks 和
+所有 CLI 的会话恢复仍需继续验证。直接 PTY 会话不跨 daemon 重启存活；tmux /adopt、Unix 文件沙盒、
 Windows 单文件发行包和 Electron 安装包均不在本阶段支持范围。
 原生 tmux 移植版需要另行验证 botmux 的 control-mode / pipe-pane / reattach 行为；
 需要上游现有完整运行环境时使用 WSL2。
+
+## 原生 Zellij 托管会话
+
+本次在 Windows 上验证 **Zellij 0.45.1**。安装官方 Windows ZIP 中的 `zellij.exe`，
+放入 PATH，然后为机器人选择后端（全局默认仍为 PTY）：
+
+```powershell
+zellij --version
+node scripts/run-windows-cli.mjs setup edit <机器人进程名或AppID> --backend zellij
+node scripts/run-windows-cli.mjs restart
+```
+
+新会话使用 Zellij。已经运行的直接 PTY 会话不会被原地迁入 Zellij；应新建话题测试。
+Zellij 服务持有原生 CLI，Botmux 的终端客户端断开或工作进程退出后，会话继续运行；
+重新连接保留同一 CLI 进程。明确关闭会话才销毁它。Windows 重启会终止进程，不能
+把 Zellij 的布局恢复理解为正在执行的任务跨系统重启存活。
+
+Windows 通过 Node 的独立 pane 启动器运行 CLI，复用 `.exe` / npm `.cmd` 解析。
+每个 pane 的环境、参数与工作目录经一次性文件传入，读取后立即删除；长提示词和
+凭证不写入 Zellij 缓存的布局或命令行。管理员身份在环境合并后重新固定。
+输入通过 Zellij 定向字节接口写入内层 ConPTY，避免两层终端翻译丢失 Unicode。
+
+验证命令（先构建）：
+
+```powershell
+bun run test -- test/windows-zellij.test.ts test/zellij-backend-helpers.test.ts test/zellij-frozen-reattach.test.ts test/zellij-observe-backend.test.ts test/zellij-session-discovery.test.ts
+node scripts/smoke-windows-zellij.mjs
+node scripts/smoke-windows-zellij-cli.mjs <Codex启动器绝对路径> <Claude启动器绝对路径>
+```
+
+真实生命周期 smoke 验证中文/引号/emoji/多行输入、窗口缩放、参数与环境、管理员
+身份、正常断开和工作进程意外退出后同 PID 重连、明确关闭后的 CLI 清理。
+真实 CLI smoke 验证 Codex 输入框内容跨重连保持，以及 Claude 原生启动，不提交模型请求。
+Windows CI 下载带固定 SHA-256 的 Zellij 0.45.1 并执行生命周期 smoke；Linux CI
+运行现有 Zellij 后端测试。原生 Windows `/adopt`、手动重命名会话、系统重启后的恢复
+以及 Zellij 内完整 Claude 模型调用仍未验收。
 
 ## 本地构建和验证
 

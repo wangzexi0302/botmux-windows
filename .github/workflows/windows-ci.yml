@@ -52,3 +52,19 @@ jobs:
         run: bun run test -- test/windows-supervisor-control.test.ts test/fleet-supervisor.integration.test.ts test/index-supervisor-env-boundary.test.ts test/fleet-command-queue.test.ts
       - name: Verify Codex title helper process lifecycle
         run: bun run test -- test/codex-app-threads.test.ts
+      - name: Verify Zellij platform boundaries and existing session behavior
+        run: bun run test -- test/windows-zellij.test.ts test/zellij-backend-helpers.test.ts test/zellij-frozen-reattach.test.ts test/zellij-observe-backend.test.ts test/zellij-session-discovery.test.ts
+      - name: Install pinned native Zellij for lifecycle smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $zellijDir = Join-Path $env:RUNNER_TEMP 'botmux-zellij-0.45.1'
+          New-Item -ItemType Directory -Force -Path $zellijDir | Out-Null
+          $archive = Join-Path $zellijDir 'zellij.zip'
+          Invoke-WebRequest 'https://github.com/zellij-org/zellij/releases/download/v0.45.1/zellij-x86_64-pc-windows-msvc.zip' -OutFile $archive
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne 'b854e7b223e67d0705c5f685ef50541c38a57981b13624d09c92bed419b6f80d') { throw 'Zellij checksum mismatch' }
+          Expand-Archive -LiteralPath $archive -DestinationPath $zellijDir
+          $zellijDir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Verify real native Zellij persistence and Unicode
+        if: runner.os == 'Windows'
+        run: node scripts/smoke-windows-zellij.mjs

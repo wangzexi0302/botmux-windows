@@ -9,6 +9,8 @@ import { zellijEnv, probeZellijFunctional } from '../../setup/ensure-zellij.js';
 import { resolveUserShell, buildBotmuxEnvAssignments, shellWrapperScript, shellCommandArgv, shellKindForPath, isExecTimeoutError } from './tmux-backend.js';
 import { resolveBotmuxWrapperBinDir } from '../../core/botmux-wrapper.js';
 import { logger } from '../../utils/logger.js';
+import { buildWindowsZellijPane, findWindowsZellijProcess, writeWindowsZellijInput } from '../../utils/windows-zellij.js';
+import { resolveExecutableLaunch } from '../../utils/pty-launch.js';
 
 /**
  * ZellijBackend — session backend using zellij for process persistence.
@@ -123,6 +125,7 @@ export class ZellijBackend implements SessionBackend {
     let out: string;
     try {
       out = execFileSync('zellij', ['list-sessions', '--no-formatting'], {
+        windowsHide: true,
         encoding: 'utf-8',
         stdio: ['ignore', 'pipe', 'pipe'],
         timeout: 3000,
@@ -182,7 +185,7 @@ export class ZellijBackend implements SessionBackend {
   /** Kill + purge a session (so no resurrectable corpse accumulates). */
   static killSession(name: string): void {
     try {
-      spawnSync('zellij', ['delete-session', name, '-f'], { stdio: 'ignore', timeout: 4000, env: zellijEnv() });
+      spawnSync('zellij', ['delete-session', name, '-f'], { windowsHide: true, stdio: 'ignore', timeout: 4000, env: zellijEnv() });
     } catch { /* doesn't exist */ }
   }
 
@@ -193,6 +196,8 @@ export class ZellijBackend implements SessionBackend {
   // ─── SessionBackend implementation ────────────────────────────────────────
 
   spawn(bin: string, args: string[], opts: SpawnOpts): void {
+    this.intentionalExit = false;
+    this.resolvedCliPid = null;
     // Reattach if the session is already live (daemon restarted, CLI survived).
     // Skip this self-heal when the caller froze the decision: a teardown gate
     // may have just killed the pane and set reattaching=false, and a live
@@ -236,13 +241,19 @@ export class ZellijBackend implements SessionBackend {
       : ['--config', configPath, '--session', this.sessionName,
          '--new-session-with-layout', layoutPath];
 
-    this.process = pty.spawn('zellij', zellijArgs, {
-      name: 'xterm-256color',
-      cols: opts.cols,
-      rows: opts.rows,
-      cwd: opts.cwd,
-      env: childEnv,
-    });
+    try {
+      const launch = resolveExecutableLaunch('zellij', zellijArgs, childEnv);
+      this.process = pty.spawn(launch.bin, launch.args, {
+        name: 'xterm-256color',
+        cols: opts.cols,
+        rows: opts.rows,
+        cwd: opts.cwd,
+        env: childEnv,
+      });
+    } catch (error) {
+      this.cleanupConfig();
+      throw error;
+    }
   }
 
   /** Write the per-session config (locked mode + cleared keybinds so pty.write
@@ -254,7 +265,14 @@ export class ZellijBackend implements SessionBackend {
     const configPath = join(this.tmpConfigDir, 'config.kdl');
     const layoutPath = join(this.tmpConfigDir, 'layout.kdl');
     writeFileSync(configPath, ZELLIJ_CONFIG_KDL);
-    if (!this.reattaching) writeFileSync(layoutPath, buildLayoutString(bin, args, opts));
+    if (!this.reattaching) {
+      const bootstrapPath = join(this.tmpConfigDir, 'launch.json');
+      if (process.platform === 'win32') {
+        const pane = buildWindowsZellijPane(bin, args, opts, bootstrapPath);
+        writeFileSync(bootstrapPath, pane.bootstrap, { mode: 0o600, flag: 'wx' });
+      }
+      writeFileSync(layoutPath, buildLayoutString(bin, args, opts, bootstrapPath));
+    }
     return { configPath, layoutPath };
   }
 
@@ -269,7 +287,8 @@ export class ZellijBackend implements SessionBackend {
 
   write(data: string): boolean {
     if (!this.process) return false;
-    this.process.write(data);
+    if (process.platform === 'win32') writeWindowsZellijInput(this.sessionName, data, this.paneId);
+    else this.process.write(data);
     return true;
   }
 
@@ -282,7 +301,7 @@ export class ZellijBackend implements SessionBackend {
   sendSpecialKeys(...keys: string[]): boolean {
     if (!this.process) return false;
     for (const key of keys) {
-      this.process.write(tmuxKeyToBytes(key));
+      this.write(tmuxKeyToBytes(key));
     }
     return true;
   }
@@ -291,7 +310,7 @@ export class ZellijBackend implements SessionBackend {
    *  detect the paste boundary and don't treat embedded \n as Enter. Mirrors
    *  `tmux paste-buffer -p`. */
   pasteText(text: string): void {
-    this.process?.write(`\x1b[200~${text}\x1b[201~`);
+    this.write(`\x1b[200~${text}\x1b[201~`);
   }
 
   resize(cols: number, rows: number): void {
@@ -305,7 +324,12 @@ export class ZellijBackend implements SessionBackend {
 
   /** Must be called AFTER spawn(). */
   onExit(cb: (code: number | null, signal: string | null) => void): void {
-    this.process?.onExit(({ exitCode, signal }) => {
+    const child = this.process;
+    child?.onExit(({ exitCode, signal }) => {
+      if (this.process === child) {
+        this.process = null;
+        if (process.platform === 'win32') this.cleanupConfig();
+      }
       // Suppress the pty-client exit caused by our own kill()/destroySession()
       // (intentional detach/teardown — the zellij session survives, so a
       // claude_exit here would falsely tear the worker down on restart). A real
@@ -329,7 +353,12 @@ export class ZellijBackend implements SessionBackend {
   kill(): void {
     this.intentionalExit = true;
     if (this.process) {
-      try { this.process.kill(); } catch { /* already dead */ }
+      try {
+        // Terminate only the attached client. node-pty's Windows kill() scans
+        // console descendants and races the already-closing console.
+        if (process.platform === 'win32') process.kill(this.process.pid);
+        else this.process.kill();
+      } catch { /* already dead */ }
       this.process = null;
     }
     this.cleanupConfig();
@@ -362,6 +391,7 @@ export class ZellijBackend implements SessionBackend {
  */
 export const ZELLIJ_CONFIG_KDL = `// botmux-generated — do not edit
 show_startup_tips false
+show_release_notes false
 pane_frames false
 default_mode "locked"
 keybinds clear-defaults=true {
@@ -370,7 +400,7 @@ keybinds clear-defaults=true {
 
 /** Escape a string for a KDL double-quoted value. */
 export function kdlString(s: string): string {
-  return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t')}"`;
 }
 
 /**
@@ -382,7 +412,18 @@ export function kdlString(s: string): string {
  * POSIX shell layouts keep the `-c <script> _ <cwd>...` contract; fish
  * layouts omit the `_` sentinel because fish exposes post-script args as $argv.
  */
-export function buildLayoutString(bin: string, args: string[], opts: SpawnOpts): string {
+export function buildLayoutString(bin: string, args: string[], opts: SpawnOpts, bootstrapPath?: string): string {
+  if (process.platform === 'win32') {
+    if (!bootstrapPath) throw new Error('Windows Zellij requires a pane bootstrap file.');
+    const launch = buildWindowsZellijPane(bin, args, opts, bootstrapPath);
+    return [
+      'layout {',
+      `    pane command=${kdlString(launch.bin)} cwd=${kdlString(opts.cwd)} close_on_exit=true {`,
+      `        args ${launch.args.map(kdlString).join(' ')}`,
+      '    }',
+      '}',
+    ].join('\n');
+  }
   const shellSpec = resolveUserShell(process.env, opts.launchShell);
   const envAssignments = buildBotmuxEnvAssignments(opts.env, opts.injectEnv);
   const kind = shellKindForPath(shellSpec.shell);
@@ -490,6 +531,7 @@ export function parseZellijServerProcs(psOut: string): ZellijServerProc[] {
  * there.
  */
 export function findServerPid(sessionName: string): number | null {
+  if (process.platform === 'win32') return findWindowsZellijProcess(sessionName, false);
   let servers: ZellijServerProc[];
   try {
     const out = execFileSync('ps', ['-eo', 'pid=,args='], {
@@ -546,6 +588,7 @@ export function findServerPid(sessionName: string): number | null {
  * child of the zellij server, so the server's lone non-zellij child is the CLI.
  */
 export function findPaneCliPid(sessionName: string, _binBasename: string): number | null {
+  if (process.platform === 'win32') return findWindowsZellijProcess(sessionName, true);
   const server = findServerPid(sessionName);
   if (!server) return null;
   try {

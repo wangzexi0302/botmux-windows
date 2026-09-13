@@ -14,6 +14,11 @@
  * in 0.44.0 and older zellij is not a viable backend.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { locateExecutable } from '../utils/executable.js';
+import { isBotmuxManagedTmuxEnvKey } from '../utils/child-env.js';
 
 /** Minimum zellij version with the full CLI-automation surface we depend on. */
 export const MIN_ZELLIJ_VERSION = { major: 0, minor: 44, patch: 0 };
@@ -28,6 +33,13 @@ export const MIN_ZELLIJ_VERSION = { major: 0, minor: 44, patch: 0 };
  * stripping TMUX/TMUX_PANE.
  */
 export function zellijEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  if (process.platform === 'win32') {
+    return Object.fromEntries(Object.entries(env).filter(([key]) => {
+      const upper = key.toUpperCase();
+      return !['ZELLIJ', 'ZELLIJ_SESSION_NAME', 'ZELLIJ_PANE_ID'].includes(upper)
+        && !isBotmuxManagedTmuxEnvKey(key) && !isBotmuxManagedTmuxEnvKey(upper);
+    }));
+  }
   const { ZELLIJ: _z, ZELLIJ_SESSION_NAME: _zn, ...rest } = env;
   return rest;
 }
@@ -55,6 +67,7 @@ function probeZellijVersion(): string | undefined {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 3000,
+      windowsHide: true,
       env: zellijEnv(),
     }).trim();
   } catch {
@@ -82,15 +95,41 @@ export function probeZellijFunctional(): { ok: true; version: string } | { ok: f
     };
   }
   const name = `bmx-probe-${process.pid}-${Date.now()}`;
-  const create = spawnSync('zellij', ['attach', '--create-background', name], {
-    stdio: ['ignore', 'ignore', 'pipe'],
-    timeout: 5000,
-    env: zellijEnv(),
-  });
-  if (create.status !== 0) {
-    const stderr = (create.stderr?.toString() ?? '').trim();
-    return { ok: false, reason: stderr || `zellij attach --create-background 失败 (exit ${create.status})` };
+  let dir: string | undefined;
+  try {
+    let prefix: string[] = [];
+    if (process.platform === 'win32') {
+      // A headless cmd.exe can exit on EOF while attach still returns zero.
+      // Use a bounded native process and verify the resulting session exists.
+      const node = locateExecutable('node', process.env);
+      if (!node) return { ok: false, reason: 'Windows Zellij 探针需要 Node.js' };
+      dir = mkdtempSync(join(tmpdir(), 'bmx-zellij-probe-'));
+      const layout = join(dir, 'probe.kdl');
+      writeFileSync(layout, `layout {\n pane command=${JSON.stringify(node)} close_on_exit=true {\n args "-e" "setTimeout(()=>{},30000)"\n }\n}\n`);
+      prefix = ['--new-session-with-layout', layout];
+    }
+    const create = spawnSync('zellij', [...prefix, 'attach', '--create-background', name], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      timeout: 5000,
+      env: zellijEnv(),
+      windowsHide: true,
+    });
+    if (create.status !== 0) {
+      const stderr = (create.stderr?.toString() ?? '').trim();
+      return { ok: false, reason: stderr || `zellij attach --create-background 失败 (exit ${create.status})` };
+    }
+    const listed = spawnSync('zellij', ['list-sessions', '--no-formatting'], {
+      encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], timeout: 3000, env: zellijEnv(),
+    });
+    if (listed.status !== 0 || !listed.stdout.split('\n').some(line => line.split(/\s+/)[0] === name && !/EXITED/i.test(line))) {
+      return { ok: false, reason: 'zellij 创建命令返回成功，但未确认后台会话存活' };
+    }
+    return { ok: true, version: raw };
+  } catch (error) {
+    return { ok: false, reason: `zellij 探针失败：${error instanceof Error ? error.message : String(error)}` };
+  } finally {
+    // The server may have started even if the create request timed out.
+    spawnSync('zellij', ['delete-session', name, '-f'], { windowsHide: true, stdio: 'ignore', timeout: 3000, env: zellijEnv() });
+    if (dir) { try { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* a late server may still hold the config */ } }
   }
-  spawnSync('zellij', ['delete-session', name, '-f'], { stdio: 'ignore', timeout: 3000, env: zellijEnv() });
-  return { ok: true, version: raw };
 }

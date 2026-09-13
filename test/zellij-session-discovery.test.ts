@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { join } from 'node:path';
 import {
   parseDumpLayoutPanes,
   parseDumpLayoutLeafPanes,
@@ -72,13 +73,13 @@ describe('parseDumpLayoutPanes', () => {
 
     expect(panes[0]).toMatchObject({
       command: 'claude',
-      cwd: '/tmp/zjproj',          // layout base "/tmp" + pane cwd "zjproj"
+      cwd: join('/tmp', 'zjproj'), // layout base "/tmp" + pane cwd "zjproj"
       args: ['5000'],
     });
     expect(panes[1]).toMatchObject({
       command: 'codex',
       name: 'codexpane',
-      cwd: '/tmp/zjproj2',
+      cwd: join('/tmp', 'zjproj2'),
       args: ['6000'],
     });
   });
@@ -162,8 +163,8 @@ describe('parseDumpLayoutLeafPanes', () => {
     const leaves = parseDumpLayoutLeafPanes(DUMP_LAYOUT_BARE_SHELL);
     // shell (bare) + claude (command) — NOT the plugins, container, or floating.
     expect(leaves).toHaveLength(2);
-    expect(leaves[0]).toMatchObject({ command: undefined, cwd: '/home/u/work', args: [] });
-    expect(leaves[1]).toMatchObject({ command: '/opt/claude', cwd: '/tmp/projA', args: ['300'] });
+    expect(leaves[0]).toMatchObject({ command: undefined, cwd: join('/home/u', 'work'), args: [] });
+    expect(leaves[1]).toMatchObject({ command: '/opt/claude', cwd: join('/', 'tmp/projA'), args: ['300'] });
   });
 
   it('aligns the CLI to the RIGHT pane id (terminal_1, not terminal_0)', () => {
@@ -242,8 +243,8 @@ describe('joinPanes', () => {
       parseListPanesJson(LIST_PANES_JSON),
     );
     expect(discovered).toEqual([
-      { session: 'bmx-abc', paneId: 'terminal_0', command: 'claude', cwd: '/tmp/zjproj', args: ['5000'], title: 'Pane #1' },
-      { session: 'bmx-abc', paneId: 'terminal_1', command: 'codex', cwd: '/tmp/zjproj2', args: ['6000'], title: 'codexpane' },
+      { session: 'bmx-abc', paneId: 'terminal_0', command: 'claude', cwd: join('/tmp', 'zjproj'), args: ['5000'], title: 'Pane #1' },
+      { session: 'bmx-abc', paneId: 'terminal_1', command: 'codex', cwd: join('/tmp', 'zjproj2'), args: ['6000'], title: 'codexpane' },
     ]);
   });
 

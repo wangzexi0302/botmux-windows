@@ -51,7 +51,7 @@ describe('kdlString', () => {
   });
 });
 
-describe('buildLayoutString', () => {
+describe.skipIf(process.platform === 'win32')('POSIX buildLayoutString', () => {
   let tmpDir: string | undefined;
   afterEach(() => {
     if (tmpDir) {
