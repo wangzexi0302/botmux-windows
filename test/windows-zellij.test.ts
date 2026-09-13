@@ -93,7 +93,8 @@ describe.skipIf(process.platform !== 'win32')('Windows Zellij', () => {
 
   it('rejects stale PID markers and only resolves a unique pane launcher child', () => {
     const { dir } = fixture();
-    const sockets = join(dir, 'contract_version_1'); mkdirSync(sockets);
+    // Match Zellij's canonical --server argv even when TEMP uses RUNNER~1.
+    const sockets = join(realpathSync.native(dir), 'contract_version_1'); mkdirSync(sockets);
     const marker = join(sockets, 'bmx-test'); writeFileSync(marker, '1234');
     vi.stubEnv('ZELLIJ_SOCKET_DIR', dir);
     const server = { pid: 1234, parent: 1, name: 'zellij.exe', command: `zellij.exe --server "${marker}"`, created: Date.now() - 5000 };
