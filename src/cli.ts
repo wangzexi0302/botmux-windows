@@ -2692,7 +2692,8 @@ async function cmdStop(): Promise<void> {
     }
     if (result.action === 'timeout') {
       throw new Error(
-        `[stop] supervisor (pid ${result.supervisorPid}) 未在超时时间内退出；已发送 SIGKILL，`
+        `[stop] supervisor (pid ${result.supervisorPid}) 未在超时时间内退出；`
+        + (process.platform === 'win32' ? '保留 supervisor 以免子进程失去管理，' : '已发送 SIGKILL，')
         + `请用 \`botmux status\` 复核 fleet 状态。`,
       );
     }
@@ -2763,7 +2764,8 @@ async function cmdRestart(): Promise<void> {
         const r = restartFleet({ refreshPersistedEnv, readFailureFallback });
         if (r.stop.action === 'timeout') {
           throw new Error(
-            `[restart] 旧 supervisor (pid ${r.stop.supervisorPid}) 未在超时时间内退出；已 SIGKILL 后仍存活，中止重启。`,
+            `[restart] 旧 supervisor (pid ${r.stop.supervisorPid}) 未在超时时间内退出；`
+            + (process.platform === 'win32' ? '保留 supervisor 并中止重启，避免重复实例。' : '已 SIGKILL 后仍存活，中止重启。'),
           );
         }
         // Health-gate on every supervised member (bot daemons + dashboard), so a

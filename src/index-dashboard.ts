@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync } from 'node:fs';
 import { installStdioEpipeGuard } from './utils/stdio-epipe-guard.js';
+import { installWindowsParentShutdown } from './utils/windows-parent-shutdown.js';
 import {
   scrubClaudeSessionMarkerEnv,
   scrubInvokerTerminalEnv,
@@ -22,6 +23,7 @@ import {
   scrubWorkflowWorkerEnv,
 } from './utils/child-env.js';
 import { loadDashboardEnvFile } from './utils/dashboard-env.js';
+const markParentShutdownReady = installWindowsParentShutdown();
 
 // Same pipe topology as the daemon: under pm2 the dashboard's stdout/stderr are
 // pipes to the God daemon (→ dashboard-out/err.log). A broken pipe would
@@ -107,6 +109,7 @@ process.env.TERM = 'xterm-256color';
 //    included) run before its first statement.
 try {
   await import('./dashboard.js');
+  markParentShutdownReady();
 } catch (err) {
   console.error(`Fatal error: ${err}`);
   process.exit(1);

@@ -16,6 +16,7 @@ import { resolveEntrySpawn } from './self-spawn.js';
 import { readFleetState } from './fleet-state-store.js';
 import { resolveBotmuxDataDir } from './data-dir.js';
 import { enqueueFleetCommand } from './fleet-command-queue.js';
+import { requestWindowsFleetStop } from './windows-fleet-control.js';
 import type { FleetProcState, FleetState } from './fleet-supervisor-policy.js';
 import { FLEET_GRACEFUL_EXIT_CODE } from './fleet-supervisor-policy.js';
 import { botProcessName } from '../setup/bot-config-editor.js';
@@ -292,6 +293,7 @@ export function startFleetViaSupervisor(options: StartFleetOptions = {}): StartF
   const child = spawn(command, [...nodeArgs, ...args], {
     cwd: CONFIG_DIR,
     detached: true,
+    windowsHide: true,
     stdio: ['ignore', out, err],
     env: resolveFleetDaemonEnv(process.env, readFleetDaemonEnvFile(), options),
   });
@@ -321,13 +323,22 @@ export interface StopFleetResult {
 export function stopFleet(timeoutMs = DEFAULT_STOP_TIMEOUT_MS): StopFleetResult {
   const pid = liveSupervisorPid();
   if (pid === undefined) return { action: 'not-running', supervisorPid: 0 };
-  try { process.kill(pid, 'SIGTERM'); } catch { return { action: 'not-running', supervisorPid: pid }; }
+  if (process.platform === 'win32') {
+    const state = readFleetState(fleetStatePath());
+    if (state?.supervisorPid !== pid) return { action: 'timeout', supervisorPid: pid };
+    requestWindowsFleetStop(join(CONFIG_DIR, 'fleet-windows-stop.json'), state);
+  } else {
+    try { process.kill(pid, 'SIGTERM'); } catch { return { action: 'not-running', supervisorPid: pid }; }
+  }
   const deadline = Date.now() + Math.max(0, timeoutMs);
   while (Date.now() < deadline) {
     if (!pidAlive(pid)) return { action: 'stopped', supervisorPid: pid };
     sleepSyncMs(STOP_POLL_INTERVAL_MS);
   }
   if (!pidAlive(pid)) return { action: 'stopped', supervisorPid: pid };
+  // Keep the owning supervisor if cleanup was not confirmed. A hard kill on
+  // Windows could orphan its children and let restart create duplicates.
+  if (process.platform === 'win32') return { action: 'timeout', supervisorPid: pid };
   // Supervisor outlasted its graceful window — hard-kill it. Its daemon children
   // already got SIGTERM from stopAll() and will exit on their own.
   try { process.kill(pid, 'SIGKILL'); } catch { /* raced to exit */ }
@@ -508,7 +519,7 @@ export function startBotViaSupervisor(
   enqueueFleetCommand(fleetCommandPath(), {
     id: idFactory(), op: 'start-bot', name: spec.name, appId: spec.appId, botIndex: spec.botIndex, at: nowIso(),
   });
-  try { process.kill(supervisorPid, 'SIGHUP'); } catch {
+  try { if (process.platform !== 'win32') process.kill(supervisorPid, 'SIGHUP'); } catch {
     return { ok: false, reason: 'fleet_down', message: 'supervisor 已不在运行', name: spec.name };
   }
   const health = waitFleetOnline([spec.name], timeoutMs);
@@ -550,7 +561,7 @@ export function stopBotViaSupervisor(
   enqueueFleetCommand(fleetCommandPath(), {
     id: idFactory(), op: 'stop-bot', name: spec.name, appId: spec.appId, botIndex: spec.botIndex, at: nowIso(),
   });
-  try { process.kill(supervisorPid, 'SIGHUP'); } catch {
+  try { if (process.platform !== 'win32') process.kill(supervisorPid, 'SIGHUP'); } catch {
     return { ok: false, reason: 'fleet_down', message: 'supervisor 已不在运行', name: spec.name };
   }
   // Poll until the bot has actually come to rest (stopped/errored/absent), or

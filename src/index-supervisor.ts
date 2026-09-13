@@ -56,7 +56,9 @@ scrubDetachedRestartEnvRefresh(process.env);
 async function main(): Promise<void> {
   const { FleetSupervisor } = await import('./core/fleet-supervisor.js');
   const { fleetStatePath, fleetDistDir, fleetLogDir, fleetCommandPath, resolveFleetBots, resolveFleetMembers, resolveFleetDaemonEnv, fleetDaemonNodeArgs } = await import('./core/fleet-runtime.js');
-  const { drainFleetCommands } = await import('./core/fleet-command-queue.js');
+  const { drainFleetCommands, readFleetCommands } = await import('./core/fleet-command-queue.js');
+  const { readFleetState } = await import('./core/fleet-state-store.js');
+  const { consumeWindowsFleetStop } = await import('./core/windows-fleet-control.js');
   const { logger } = await import('./utils/logger.js');
 
   // Every supervised member: the bot daemons from bots.json PLUS the dashboard.
@@ -103,7 +105,7 @@ async function main(): Promise<void> {
         drainAgain = false;
         const commands = drainFleetCommands(fleetCommandPath());
         if (commands.length > 0) {
-          logger.info(`[supervisor] SIGHUP → draining ${commands.length} command(s)`);
+          logger.info(`[supervisor] control → draining ${commands.length} command(s)`);
           await supervisor.drainCommands(commands);
         }
       } while (drainAgain);
@@ -111,10 +113,32 @@ async function main(): Promise<void> {
       draining = false;
     }
   };
-  process.on('SIGHUP', () => void drain());
+  if (process.platform !== 'win32') process.on('SIGHUP', () => void drain());
 
   logger.info(`[supervisor] starting fleet: ${botCount} bot(s) + dashboard`);
+  // Commands belong to the prior supervisor. A fresh start re-reads bots.json;
+  // discard old intent before publishing this process as the live supervisor.
+  if (process.platform === 'win32') drainFleetCommands(fleetCommandPath());
   supervisor.start(members);
+  if (process.platform === 'win32') {
+    const identity = readFleetState(fleetStatePath());
+    if (!identity || identity.supervisorPid !== process.pid) throw new Error('Missing Windows supervisor identity');
+    let polling = false;
+    const timer = setInterval(async () => {
+      if (shuttingDown || polling) return;
+      polling = true;
+      try {
+        if (consumeWindowsFleetStop(join(configDir, 'fleet-windows-stop.json'), identity)) {
+          await shutdown('Windows control');
+        } else if (readFleetCommands(fleetCommandPath()).length > 0) {
+          await drain();
+        }
+      } catch (err) {
+        logger.error(`[supervisor] Windows control failed: ${err instanceof Error ? err.message : err}`);
+      } finally { polling = false; }
+    }, 250);
+    timer.unref();
+  }
   // Keep the process alive supervising; children + timers hold the event loop.
 }
 

@@ -16,7 +16,7 @@ Codex / Claude Code 共用的启动处理。Windows 默认使用 PTY，Linux/mac
 
 这是开发中的原生适配，**尚未完成真实飞书消息到 CLI 再返回卡片的验收**。
 启动 smoke 只执行两个已安装 CLI 的 `--version`，不会调用模型。
-Windows 上的完整单元测试套件、supervisor 信号/重启/进程清理、CLI hooks 和
+Windows 上的完整单元测试套件、活跃 CLI 会话关闭时的进程清理、CLI hooks 和
 会话恢复仍需继续验证。PTY 会话不跨 daemon 重启存活；tmux /adopt、Unix 文件沙盒、
 Windows 单文件发行包和 Electron 安装包均不在本阶段支持范围。
 原生 tmux 移植版需要另行验证 botmux 的 control-mode / pipe-pane / reattach 行为；
@@ -45,6 +45,13 @@ Bun 只负责包管理和构建。实际测试中 Bun 1.4.2 的 ConPTY 路径会
 版本检查、更新状态探测和 Codex 模型列表查询也复用同一 npm 启动器解析，
 避免 Windows 的 `execFile` 直接运行 `.cmd` 时返回 `EINVAL`。smoke 同时检查
 真实 CLI 的管道调用与 PTY 调用；FNM 的 POSIX 符号链接布局测试仅在 Linux 运行。
+
+Windows 的 supervisor 通过本地命令队列轮询处理单机器人操作，通过绑定 PID 和
+启动时间的停止请求退出整组服务；自有 daemon/dashboard 子进程通过 Node IPC
+执行清理。父进程丢失也会请求清理，启动中收到的请求会等清理处理器就绪再执行。
+停止超时时保留 supervisor 并报错，避免强杀父进程后生成重复实例。
+已在本机验证 `start`、`stop`、`restart`、`start-bot` 和 `stop-bot`，并确认
+重启后 daemon/dashboard 在线、飞书长连接重新建立；这尚不代表活跃 CLI 会话已验收。
 
 测试覆盖真实 PTY 输入/输出、窗口调整、退出清理、中文和特殊字符 argv、环境注入、
 两种 CLI 的查找、POSIX 后端默认值，以及真实临时 Git 仓库中的同步/冲突/分叉。

@@ -44,10 +44,15 @@ vi.mock('../src/core/fleet-runtime.js', () => ({
 
 vi.mock('../src/core/fleet-command-queue.js', () => ({
   drainFleetCommands: () => [],
+  readFleetCommands: () => [],
+}));
+
+vi.mock('../src/core/fleet-state-store.js', () => ({
+  readFleetState: () => ({ supervisorPid: process.pid, supervisorStartedAt: 'test', procs: [] }),
 }));
 
 vi.mock('../src/utils/logger.js', () => ({
-  logger: { info: vi.fn() },
+  logger: { info: vi.fn(), error: vi.fn() },
 }));
 
 vi.mock('../src/utils/stdio-epipe-guard.js', () => ({

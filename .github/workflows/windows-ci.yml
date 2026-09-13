@@ -48,3 +48,5 @@ jobs:
         run: bun run test -- test/windows-launch.test.ts test/executable.test.ts test/pty-backend-launch-shell.test.ts test/windows-stdin-encoding.test.ts test/backend-gate.test.ts test/cli-runtime-update.test.ts test/codex-coco-detect-models.test.ts
       - name: Verify upstream sync against disposable Git repositories
         run: node --test test/sync-upstream.test.mjs
+      - name: Verify supervisor lifecycle and native Windows control
+        run: bun run test -- test/windows-supervisor-control.test.ts test/fleet-supervisor.integration.test.ts test/index-supervisor-env-boundary.test.ts test/fleet-command-queue.test.ts

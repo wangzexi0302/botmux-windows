@@ -44,7 +44,11 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 function fakeDist(root: string, body: string): string {
   const dist = join(root, 'dist');
   mkdirSync(dist, { recursive: true });
-  writeFileSync(join(dist, 'index-daemon.js'), body);
+  // Mirror the real Windows entry's private parent IPC → graceful handler.
+  const ipc = process.platform === 'win32'
+    ? "process.on('message', m => { if (m === 'botmux:parent-shutdown') process.emit('SIGTERM'); });\n"
+    : '';
+  writeFileSync(join(dist, 'index-daemon.js'), ipc + body);
   return dist;
 }
 

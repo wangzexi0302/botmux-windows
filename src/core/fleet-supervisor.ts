@@ -13,6 +13,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { openSync, closeSync, mkdirSync } from 'node:fs';
+import { WINDOWS_PARENT_SHUTDOWN_MESSAGE } from '../utils/windows-parent-shutdown.js';
 import { join } from 'node:path';
 import { isStandaloneBinary, resolveEntrySpawn, type BotmuxEntry } from './self-spawn.js';
 import { scrubExternalMemberEnv } from '../utils/child-env.js';
@@ -334,7 +335,7 @@ export class FleetSupervisor {
     // onChildExit). When no logDir is configured (tests), the child inherits
     // our stdio.
     const logBase = spec.logBaseName ?? `daemon-${spec.botIndex}`;
-    let stdio: Array<'ignore' | 'inherit' | number> = ['ignore', 'inherit', 'inherit'];
+    let stdio: Array<'ignore' | 'inherit' | 'ipc' | number> = ['ignore', 'inherit', 'inherit'];
     let outFd: number | undefined;
     let errFd: number | undefined;
     if (this.opts.logDir) {
@@ -377,6 +378,7 @@ export class FleetSupervisor {
     } else {
       childEnv = { ...this.opts.daemonEnv };
     }
+    if (process.platform === 'win32' && !spec.external) stdio.push('ipc');
     const child = spawn(command, [...nodeArgs, ...args], {
       cwd: spec.external?.cwd ?? this.opts.cwd,
       stdio,
@@ -543,7 +545,13 @@ export class FleetSupervisor {
         reject(new Error(`fleet: stop not confirmed for ${name}`));
       }, timeout + 5_000);
       child.once('exit', finish);
-      try { child.kill('SIGTERM'); } catch { /* wait for exit or the deadline */ }
+      try {
+        if (process.platform === 'win32' && !this.knownSpecs.get(name)?.external && child.connected) {
+          child.send(WINDOWS_PARENT_SHUTDOWN_MESSAGE, () => { /* exit/timeout confirms cleanup */ });
+        } else {
+          child.kill('SIGTERM');
+        }
+      } catch { /* wait for exit or the deadline */ }
     });
   }
 }
