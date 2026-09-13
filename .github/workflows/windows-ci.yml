@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: compatibility-${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   compatibility:
     name: compatibility (${{ matrix.os }})
@@ -37,6 +41,9 @@ jobs:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
       - run: bun run build
+      - name: Verify native Windows CLI entry
+        if: runner.os == 'Windows'
+        run: bun run windows:cli --help
       - name: Verify executable discovery and real PTY lifecycle
         run: bun run test -- test/windows-launch.test.ts test/executable.test.ts test/pty-backend-launch-shell.test.ts test/windows-stdin-encoding.test.ts test/backend-gate.test.ts
       - name: Verify upstream sync against disposable Git repositories

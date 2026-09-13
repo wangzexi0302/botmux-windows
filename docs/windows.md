@@ -33,7 +33,15 @@ bun run build
 bun run test -- test/windows-launch.test.ts test/executable.test.ts test/pty-backend-launch-shell.test.ts test/windows-stdin-encoding.test.ts test/backend-gate.test.ts
 node --test test/sync-upstream.test.mjs
 node scripts/smoke-windows-cli.mjs
+bun run windows:cli --help
 ```
+
+Windows 运行时使用经过版本检查的 Node.js 入口 `bun run windows:cli <命令>`；
+Bun 只负责包管理和构建。实际测试中 Bun 1.4.2 的 ConPTY 路径会使 Codex 提前退出，
+因此本阶段不支持直接用 `bun dist/cli.js` 或 `daemon:bun` 运行 Windows 会话。
+入口使用 Node 22.13+，确保 SQLite 引擎可用，并让后续 daemon/worker 使用同一个解释器。
+
+本机已验证 Codex `0.142.5`、Claude Code `2.1.201` 的真实 `--version` 启动和正常退出。
 
 测试覆盖真实 PTY 输入/输出、窗口调整、退出清理、中文和特殊字符 argv、环境注入、
 两种 CLI 的查找、POSIX 后端默认值，以及真实临时 Git 仓库中的同步/冲突/分叉。
@@ -61,6 +69,8 @@ GitHub Actions 手动运行。GitHub 的定时执行可能延迟，公开仓库 
 本 Fork 默认分支必须是 `codex/windows`，使定时工作流生效。Actions 需要允许
 工作流创建 PR；使用仓库自带 `GITHUB_TOKEN`，不需要存储个人访问令牌。
 只有 `sync` 作业拥有内容/PR 写权限，运行项目代码的验证作业只有读取权限。
+Fork 中已停用继承来的上游发布、npm dist-tag、文档发布和发布审批清理工作流；
+这些文件仍保留，避免同步时产生不必要差异。
 
 ## 日常开发
 

@@ -30,6 +30,8 @@ describe.skipIf(process.platform !== 'win32')('Windows executable resolution', (
     expect(locateExecutable('codex', { Path: `"${root}"`, Pathext: '.EXE;.CMD' })).toBe(join(root, 'codex.cmd'));
     expect(locateExecutable(join(root, 'codex'), { PATHEXT: '.CMD' })).toBe(join(root, 'codex.cmd'));
     expect(locateExecutable('missing', { PATH: root })).toBeNull();
+    writeFileSync(join(root, 'tools.cli.exe'), 'fixture');
+    expect(locateExecutable('tools.cli', { PATH: root })).toBe(join(root, 'tools.cli.exe'));
   });
 
   it('does not accept unsupported script types or directories', () => {

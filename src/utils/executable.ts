@@ -24,8 +24,8 @@ export function locateExecutable(cmd: string | undefined, env: NodeJS.ProcessEnv
       ?? env[Object.keys(env).find(key => key.toUpperCase() === name) ?? name];
     const extensions = (getEnv('PATHEXT') ?? '.COM;.EXE;.BAT;.CMD')
       .split(';').filter(ext => /^\.(?:exe|com|cmd|bat)$/i.test(ext));
-    if (extname(cmd) && !/^\.(?:exe|com|cmd|bat)$/i.test(extname(cmd))) return null;
-    const names = extname(cmd) ? [cmd] : extensions.map(ext => cmd + ext.toLowerCase());
+    const names = /^\.(?:exe|com|cmd|bat)$/i.test(extname(cmd))
+      ? [cmd] : extensions.map(ext => cmd + ext.toLowerCase());
     const dirs = isAbsolute(cmd) || /[\\/]/.test(cmd)
       ? ['']
       : (getEnv('PATH') ?? '').split(';').filter(Boolean);
