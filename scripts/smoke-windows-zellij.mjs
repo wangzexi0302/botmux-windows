@@ -1,8 +1,8 @@
 // Real native Zellij: Unicode input, pane-local env, resize, worker death,
 // reattach to the SAME CLI process, and explicit close. No model calls.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { spawn, execFileSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ZellijBackend } from '../dist/adapters/backend/zellij-backend.js';
@@ -44,7 +44,7 @@ process.on('message',msg=>{
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(predicate, message, timeout = 15000) {
   const end = Date.now() + timeout;
-  while (Date.now() < end) { if (predicate()) return; await pause(100); }
+  while (Date.now() < end) { if (await predicate()) return; await pause(100); }
   throw new Error(message);
 }
 function readReport() { try { return JSON.parse(readFileSync(report, 'utf8')); } catch { return {}; } }
@@ -75,7 +75,7 @@ try {
   assert.equal(readReport().env, arg + '\nsecond line');
   assert.equal(readReport().owner, 'test-owner');
   assert.equal(readReport().legacy, 'test-owner');
-  assert.equal((await request('pid')).pid, cliPid, 'native CLI PID discovery');
+  await until(async () => (await request('pid')).pid === cliPid, 'native CLI PID discovery');
   const first = '\x1b[200~' + arg + '\n' + '中文——'.repeat(250) + '\x1b[201~';
   await request('input', { data: first });
   await until(() => readReport().data === first, 'Unicode / multiline / chunked input mismatch');
@@ -99,6 +99,22 @@ try {
   await until(() => !alive(cliPid), 'explicit close left the CLI running');
   assert.equal(ZellijBackend.probeSession(name), 'missing');
   console.log('PASS native Zellij: exact argv/env/owner, Unicode input, resize, graceful detach, worker crash, same-PID reattach, explicit close.');
+} catch (error) {
+  // Keep CI failures inspectable without printing unrelated processes or env.
+  const root = process.env.ZELLIJ_SOCKET_DIR ?? join(tmpdir(), 'zellij');
+  try {
+    console.error('Zellij discovery root:', root, 'canonical:', realpathSync(root));
+    for (const entry of readdirSync(root)) {
+      if (!/^contract_version_\d+$/.test(entry)) continue;
+      const marker = join(root, entry, name);
+      try { console.error('Zellij marker:', marker, 'PID:', readFileSync(marker, 'utf8'), 'modified:', statSync(marker).mtimeMs); } catch {}
+    }
+    if (Number.isSafeInteger(cliPid) && cliPid > 0) {
+      const script = `$all=@(Get-CimInstance Win32_Process); $next=${cliPid}; $rows=@(); for($depth=0;$depth -lt 4;$depth++){ $p=$all | Where-Object ProcessId -eq $next | Select-Object -First 1; if(!$p){break}; $rows+=@{pid=$p.ProcessId;parent=$p.ParentProcessId;name=$p.Name;created=([DateTimeOffset]$p.CreationDate).ToUnixTimeMilliseconds();server=if($p.Name -eq 'zellij.exe' -and $p.CommandLine -match '--server'){$p.CommandLine}else{''}}; $next=$p.ParentProcessId }; ConvertTo-Json -Compress -InputObject $rows`;
+      console.error('Fixture ancestors:', execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, encoding: 'utf8', timeout: 20000 }));
+    }
+  } catch (diagnosticError) { console.error('Discovery diagnostic failed:', diagnosticError.message); }
+  throw error;
 } finally {
   for (const child of allHosts) if (child.exitCode === null && child.signalCode === null) child.kill();
   ZellijBackend.killSession(name);
