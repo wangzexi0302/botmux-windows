@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { resolveCommandReal } from './registry.js';
+import { resolveExecutableLaunch } from '../../utils/pty-launch.js';
 import { parseDebugModelsJson } from './model-catalog-json.js';
 import type { CliAdapter, PtyHandle } from './types.js';
 import { writeRunnerInput } from './runner-input.js';
@@ -100,7 +101,8 @@ export function createCodexAppAdapter(pathOverride?: string): CliAdapter {
         // same resolver or whichever runs first would decide the cached value and
         // silently change what the other two get. It also execs the binary itself.
         const codexBin = (cachedCodexBin ??= resolveCommandReal(rawCodexBin));
-        const { stdout } = await execFileAsync(codexBin, ['debug', 'models'], {
+        const launch = resolveExecutableLaunch(codexBin, ['debug', 'models'], process.env);
+        const { stdout } = await execFileAsync(launch.bin, launch.args, {
           timeout: 8000,
           maxBuffer: 16 * 1024 * 1024,
           windowsHide: true,

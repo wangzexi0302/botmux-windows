@@ -42,6 +42,9 @@ Bun 只负责包管理和构建。实际测试中 Bun 1.4.2 的 ConPTY 路径会
 入口使用 Node 22.13+，确保 SQLite 引擎可用，并让后续 daemon/worker 使用同一个解释器。
 
 本机已验证 Codex `0.142.5`、Claude Code `2.1.201` 的真实 `--version` 启动和正常退出。
+版本检查、更新状态探测和 Codex 模型列表查询也复用同一 npm 启动器解析，
+避免 Windows 的 `execFile` 直接运行 `.cmd` 时返回 `EINVAL`。smoke 同时检查
+真实 CLI 的管道调用与 PTY 调用；FNM 的 POSIX 符号链接布局测试仅在 Linux 运行。
 
 测试覆盖真实 PTY 输入/输出、窗口调整、退出清理、中文和特殊字符 argv、环境注入、
 两种 CLI 的查找、POSIX 后端默认值，以及真实临时 Git 仓库中的同步/冲突/分叉。

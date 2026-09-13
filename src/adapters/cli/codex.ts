@@ -3,6 +3,7 @@ import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { resolveCommand } from './registry.js';
+import { resolveExecutableLaunch } from '../../utils/pty-launch.js';
 import { BOTMUX_SHELL_HINTS } from './shared-hints.js';
 import { parseDebugModelsJson } from './model-catalog-json.js';
 import type { CliAdapter, PtyHandle } from './types.js';
@@ -507,7 +508,8 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
         // 的测试 import 阶段炸（mock 无 execFile 导出）；推迟到调用时，fail-soft
         // 的 try/catch 兜住（契约：任何异常 → null）。
         const execFileAsync = promisify(execFile);
-        const { stdout } = await execFileAsync(this.resolvedBin, ['debug', 'models'], {
+        const launch = resolveExecutableLaunch(this.resolvedBin, ['debug', 'models'], process.env);
+        const { stdout } = await execFileAsync(launch.bin, launch.args, {
           timeout: 8000,
           maxBuffer: 16 * 1024 * 1024,
           windowsHide: true,

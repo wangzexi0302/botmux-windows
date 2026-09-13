@@ -7,7 +7,7 @@ import { isExecutable, locateExecutable } from './executable.js';
  * syntax. Native executables and every POSIX launch retain their original argv.
  * Arbitrary batch programs need an explicit native executable wrapper instead.
  */
-export function resolvePtyLaunch(
+export function resolveExecutableLaunch(
   bin: string, args: string[], env: NodeJS.ProcessEnv,
 ): { bin: string; args: string[] } {
   if (process.platform !== 'win32') return { bin, args };
@@ -18,7 +18,7 @@ export function resolvePtyLaunch(
   // arbitrary batch files, or guess a package entry from the command's name.
   const entry = shim.match(/"%_prog%"\s+"%dp0%[\\/]([^"\r\n]+\.(?:[cm]?js))"\s+%\*/i)?.[1];
   if (!entry) {
-    throw new Error(`Windows PTY cannot launch this batch file: ${resolved}. Use a native .exe or an npm Node.js launcher.`);
+    throw new Error(`Windows cannot launch this batch file: ${resolved}. Use a native .exe or an npm Node.js launcher.`);
   }
   const script = resolve(dirname(resolved), entry);
   if (!isExecutable(script)) throw new Error(`npm launcher entry is missing: ${script}`);
@@ -27,3 +27,6 @@ export function resolvePtyLaunch(
   if (!node) throw new Error(`Node.js is required by the npm launcher: ${resolved}`);
   return { bin: node, args: [script, ...args] };
 }
+
+// PTY and pipe-based probes must resolve npm shims in exactly the same way.
+export const resolvePtyLaunch = resolveExecutableLaunch;

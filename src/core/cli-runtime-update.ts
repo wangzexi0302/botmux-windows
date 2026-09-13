@@ -11,6 +11,7 @@
  * but never executes an update command.
  */
 import { execFile } from 'node:child_process';
+import { resolveExecutableLaunch } from '../utils/pty-launch.js';
 import {
   existsSync,
   mkdirSync,
@@ -287,7 +288,8 @@ export function listCliRuntimeUpdateEntries(dataDir: string): CliRuntimeUpdateEn
 
 function execFileText(bin: string, args: string[], timeoutMs: number): Promise<string> {
   return new Promise<string>((resolvePromise, reject) => {
-    execFile(bin, args, { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024 }, (error, stdout) => {
+    const launch = resolveExecutableLaunch(bin, args, process.env);
+    execFile(launch.bin, launch.args, { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
       const output = String(stdout ?? '').trim();
       // `doctor` may exit non-zero for an unrelated optional check while still
       // returning a complete machine-readable report.

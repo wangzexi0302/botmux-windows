@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -7,11 +8,16 @@ const root = mkdtempSync(join(tmpdir(), 'botmux-cli-smoke-'));
 process.env.SESSION_DATA_DIR = join(root, 'data');
 const { createCliAdapterSync } = await import('../dist/adapters/cli/registry.js');
 const { PtyBackend } = await import('../dist/adapters/backend/pty-backend.js');
+const { resolveExecutableLaunch } = await import('../dist/utils/pty-launch.js');
 
 let exitCode = 0;
 try {
   for (const id of ['codex', 'claude-code']) {
     const adapter = createCliAdapterSync(id);
+    const launch = resolveExecutableLaunch(adapter.resolvedBin, ['--version'], process.env);
+    const version = execFileSync(launch.bin, launch.args, { encoding: 'utf8', timeout: 20_000, windowsHide: true }).trim();
+    if (!/\d+\.\d+/.test(version)) throw new Error(`No pipe version received from ${id}`);
+    console.log(`${id}: ${version} (native Windows pipe, exit 0)`);
     const backend = new PtyBackend();
     let output = '';
     try {

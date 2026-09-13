@@ -727,7 +727,7 @@ describe('runCliRuntimeUpdateAudit', () => {
     await runCliRuntimeUpdateAudit(deps());
     expect(probe).toHaveBeenCalledTimes(1);
     expect(notified).toEqual(['0.144.3']);
-    expect(store.entries['codex:/usr/bin/codex'].displayName).toBe('Codex');
+    expect(store.entries[`codex:${resolve('/usr/bin/codex')}`].displayName).toBe('Codex');
 
     now += 60 * 60 * 1_000;
     await runCliRuntimeUpdateAudit(deps());
@@ -746,7 +746,7 @@ describe('runCliRuntimeUpdateAudit', () => {
 
   it('persists removal of a legacy auto command inside TTL without probing', async () => {
     const now = 1_500_000;
-    const key = 'vendor-codex:/opt/vendor-codex';
+    const key = `vendor-codex:${resolve('/opt/vendor-codex')}`;
     let store: CliRuntimeUpdateStore = {
       entries: {
         [key]: updateEntry({
@@ -799,7 +799,7 @@ describe('runCliRuntimeUpdateAudit', () => {
   it('carries a real reader migration through audit and rewrites the old store', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'botmux-cli-runtime-auto-migration-'));
     const now = 1_500_000;
-    const key = 'vendor-codex:/opt/vendor-codex';
+    const key = `vendor-codex:${resolve('/opt/vendor-codex')}`;
     try {
       writeCliRuntimeUpdateStoreTo(dir, {
         entries: {
@@ -893,7 +893,7 @@ describe('runCliRuntimeUpdateAudit', () => {
       notify,
     });
 
-    expect(store.entries['acme-codex:/opt/acme-codex']).toMatchObject({
+    expect(store.entries[`acme-codex:${resolve('/opt/acme-codex')}`]).toMatchObject({
       managed: false,
       current: '1.0.0',
       latest: null,
@@ -905,7 +905,7 @@ describe('runCliRuntimeUpdateAudit', () => {
 
   it('bypasses TTL and resets the notification watermark when provider changes', async () => {
     const now = 2_000_000;
-    const key = 'vendor-codex:/opt/vendor-codex';
+    const key = `vendor-codex:${resolve('/opt/vendor-codex')}`;
     let store: CliRuntimeUpdateStore = {
       entries: {
         [key]: updateEntry({
@@ -959,7 +959,7 @@ describe('runCliRuntimeUpdateAudit', () => {
 
   it('refreshes auto package ownership before TTL and isolates its notification watermark', async () => {
     const now = 2_500_000;
-    const key = 'vendor-codex:/opt/vendor-codex';
+    const key = `vendor-codex:${resolve('/opt/vendor-codex')}`;
     let store: CliRuntimeUpdateStore = {
       entries: {
         [key]: updateEntry({
@@ -1034,7 +1034,7 @@ describe('runCliRuntimeUpdateAudit', () => {
 
   it('does not inherit status or notification state when the npm package changes and probing fails', async () => {
     const now = 3_000_000;
-    const key = 'vendor-codex:/opt/vendor-codex';
+    const key = `vendor-codex:${resolve('/opt/vendor-codex')}`;
     let store: CliRuntimeUpdateStore = {
       entries: {
         [key]: updateEntry({
@@ -1074,7 +1074,7 @@ describe('runCliRuntimeUpdateAudit', () => {
       runtimeId: 'vendor-codex',
       displayName: 'Vendor Codex',
       binPath: '/opt/vendor-codex',
-      installationPath: '/opt/vendor-codex',
+      installationPath: resolve('/opt/vendor-codex'),
       provider: 'npm',
       packageName: '@vendor/codex-new',
       sourceFingerprint: JSON.stringify(['npm', '@vendor/codex-new']),
@@ -1339,7 +1339,8 @@ describe('CLI runtime update store and card', () => {
   });
 });
 
-describe('runCliRuntimeUpdateAudit with FNM rotating launcher symlinks', () => {
+// FNM's POSIX symlink layout requires symlink privileges on native Windows.
+describe.skipIf(process.platform === 'win32')('runCliRuntimeUpdateAudit with FNM rotating launcher symlinks', () => {
   let dir: string;
   let realInstall: string;
 

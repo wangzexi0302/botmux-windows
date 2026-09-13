@@ -1,4 +1,5 @@
 import { execFileSync, type ChildProcess } from 'node:child_process';
+import { resolveExecutableLaunch } from './utils/pty-launch.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, existsSync, mkdirSync, unlinkSync, watch, readdirSync, realpathSync } from 'node:fs';
 import { installDaemonRejectionGuard } from './utils/daemon-rejection-guard.js';
@@ -4520,9 +4521,11 @@ function refreshCliVersion(botCfg: Pick<BotConfig, 'cliId' | 'cliRuntime' | 'cli
     // Remote backends (riff) have no local binary to version-check — skip.
     if (!adapter.resolvedBin && !adapter.versionCommand) return false;
     const versionCommand = adapter.versionCommand?.() ?? { bin: adapter.resolvedBin, args: ['--version'] };
-    const raw = execFileSync(versionCommand.bin, versionCommand.args, {
+    const launch = resolveExecutableLaunch(versionCommand.bin, versionCommand.args, process.env);
+    const raw = execFileSync(launch.bin, launch.args, {
       encoding: 'utf-8',
       timeout: 5_000,
+      windowsHide: true,
     }).trim();
     const newVersion = raw.replace(/^[^0-9]*/, '');
 

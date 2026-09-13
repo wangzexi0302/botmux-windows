@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { locateExecutable } from '../src/utils/executable.js';
-import { resolvePtyLaunch } from '../src/utils/pty-launch.js';
+import { resolveExecutableLaunch, resolvePtyLaunch } from '../src/utils/pty-launch.js';
 import { createCliAdapterSync, resolveCommand } from '../src/adapters/cli/registry.js';
 import { detectDefaultBackend } from '../src/config.js';
 import { PtyBackend } from '../src/adapters/backend/pty-backend.js';
@@ -62,6 +63,17 @@ describe.skipIf(process.platform !== 'win32')('Windows executable resolution', (
     const batch = join(root, 'custom.cmd');
     writeFileSync(batch, '@echo off\n%*');
     expect(() => resolvePtyLaunch(batch, ['& echo injected'], process.env)).toThrow(/native .exe/);
+  });
+
+  it('runs an npm version/model probe through pipes without a command shell', () => {
+    const root = temp();
+    writeFileSync(join(root, 'probe.cjs'), 'console.log(JSON.stringify(process.argv.slice(2)))');
+    const shim = join(root, 'probe.cmd');
+    writeFileSync(shim, '@echo off\r\n"%_prog%" "%dp0%\\probe.cjs" %*\r\n');
+    const args = ['debug', 'models', '中文 & %PATH%', 'say "hi"', ''];
+    const launch = resolveExecutableLaunch(shim, args, process.env);
+    const output = execFileSync(launch.bin, launch.args, { encoding: 'utf8', windowsHide: true });
+    expect(JSON.parse(output)).toEqual(args);
   });
 });
 
