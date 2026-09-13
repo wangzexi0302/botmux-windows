@@ -1,5 +1,9 @@
 # botmux
 
+> **Windows 适配 Fork（开发中）**：维护分支为 `codex/windows`，`master` 跟踪上游。
+> 当前提供原生 Windows 构建和 Codex / Claude Code 的 PTY 启动适配；完整飞书链路仍在验证。
+> 构建、测试、限制和每周两次的上游同步流程见 [Windows 说明](docs/windows.md)。下文为上游说明。
+
 <p align="center">
   <img src="cover.svg" alt="botmux" width="760">
 </p>

@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { isExecutable, locateExecutable } from '../src/utils/executable.js';
 
 let dir: string;
@@ -32,7 +32,7 @@ describe('isExecutable', () => {
     expect(isExecutable(f)).toBe(true);
   });
 
-  it('rejects a regular file WITHOUT the executable bit (EACCES)', () => {
+  it.skipIf(process.platform === 'win32')('rejects a regular file WITHOUT the executable bit (EACCES)', () => {
     const f = join(dir, 'notexec');
     writeFileSync(f, 'plain\n');
     chmodSync(f, 0o644);
@@ -51,7 +51,7 @@ describe('isExecutable', () => {
     expect(isExecutable(join(dir, 'nope-does-not-exist'))).toBe(false);
   });
 
-  it('follows a symlink to a real executable', () => {
+  it.skipIf(process.platform === 'win32')('follows a symlink to a real executable', () => {
     const target = join(dir, 'symtarget');
     writeFileSync(target, '#!/bin/sh\n');
     chmodSync(target, 0o755);
@@ -76,11 +76,11 @@ describe('locateExecutable (PR #836: directory on PATH must not resolve)', () =>
     const dirWithDir = mkdtempSync(join(tmpdir(), 'exec-p1-'));
     const dirWithBin = mkdtempSync(join(tmpdir(), 'exec-p2-'));
     mkdirSync(join(dirWithDir, 'zellij'), 0o755); // directory shadow first
-    const bin = join(dirWithBin, 'zellij');
+    const bin = join(dirWithBin, process.platform === 'win32' ? 'zellij.exe' : 'zellij');
     writeFileSync(bin, '#!/bin/sh\n');
     chmodSync(bin, 0o755);
     try {
-      expect(locateExecutable('zellij', { PATH: `${dirWithDir}:${dirWithBin}` })).toBe(bin);
+      expect(locateExecutable('zellij', { PATH: `${dirWithDir}${delimiter}${dirWithBin}` })).toBe(bin);
     } finally {
       rmSync(dirWithDir, { recursive: true, force: true });
       rmSync(dirWithBin, { recursive: true, force: true });

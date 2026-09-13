@@ -97,9 +97,13 @@ export async function ensureDependencies(): Promise<DependenciesReport> {
   // explicitly opts into the PTY escape hatch (BACKEND_TYPE=pty). Surface this
   // loudly instead of pretending "常规对话不受影响" — that was true under the
   // old silent-fallback behavior and is now misleading.
-  const tmux = await ensureTmux(platform);
+  const tmux: TmuxResult = process.platform === 'win32'
+    ? { installed: false, freshInstall: false, binaryPresent: false, reason: '原生 Windows 使用 ConPTY；tmux 持久后端尚未验证。' }
+    : await ensureTmux(platform);
   const ptyOptIn = (process.env.BACKEND_TYPE ?? '').toLowerCase() === 'pty';
-  if (tmux.installed) {
+  if (process.platform === 'win32') {
+    console.log('✓ Windows 默认使用 ConPTY；会话不跨 daemon 重启存活，tmux /adopt 暂不可用。');
+  } else if (tmux.installed) {
     if (!tmux.freshInstall) console.log(`✓ tmux ${tmux.version} (existing)`);
   } else if (ptyOptIn) {
     console.warn('');

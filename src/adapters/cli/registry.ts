@@ -129,6 +129,7 @@ export function macOSBundledCodexCandidates(userHome = homedir()): string[] {
  *  passed as positional argv ($1), never interpolated into the shell program:
  *  spaces and shell metacharacters therefore remain one literal filename. */
 export function resolveCommand(cmd: string): string {
+  if (process.platform === 'win32') return locateExecutable(cmd) ?? cmd;
   if (isAbsolute(cmd)) return cmd;
   const shell = process.env.SHELL || '/bin/zsh';
   const shells = [shell, '/bin/zsh', '/bin/bash'].filter((v, i, a) => a.indexOf(v) === i);

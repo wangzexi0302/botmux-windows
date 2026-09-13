@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import type { SessionBackend, SpawnOpts } from './types.js';
 import { logger } from '../../utils/logger.js';
+import { resolvePtyLaunch } from '../../utils/pty-launch.js';
 
 // npx may strip execute bits from prebuilt binaries — fix before first spawn.
 try {
@@ -32,7 +33,9 @@ export class PtyBackend implements SessionBackend {
       `[pty] spawn bin=${bin} args=${JSON.stringify(args)} ` +
       `cwd=${opts.cwd} ${opts.cols}x${opts.rows}`,
     );
-    this.process = pty.spawn(bin, args, {
+    const env = opts.injectEnv ? { ...opts.env, ...opts.injectEnv } : opts.env;
+    const launch = resolvePtyLaunch(bin, args, env);
+    this.process = pty.spawn(launch.bin, launch.args, {
       name: 'xterm-256color',
       cols: opts.cols,
       rows: opts.rows,
@@ -40,7 +43,7 @@ export class PtyBackend implements SessionBackend {
       // No shared backing server here, so per-bot env (opts.injectEnv) is safe
       // to merge straight into the child env — appended last so it wins over a
       // same-named key already in opts.env.
-      env: opts.injectEnv ? { ...opts.env, ...opts.injectEnv } : opts.env,
+      env,
     });
     logger.debug(`[pty] spawned pid=${this.process.pid}`);
   }
@@ -62,7 +65,11 @@ export class PtyBackend implements SessionBackend {
 
   /** Must be called AFTER spawn(). Callbacks registered before spawn are silently lost. */
   onExit(cb: (code: number | null, signal: string | null) => void): void {
-    this.process?.onExit(({ exitCode, signal }) => {
+    const child = this.process;
+    child?.onExit(({ exitCode, signal }) => {
+      // Do not ask ConPTY to kill an already-exited process (its console-list
+      // helper would fail AttachConsole). An old exit must not clear a new spawn.
+      if (this.process === child) this.process = null;
       cb(exitCode, signal !== undefined ? String(signal) : null);
     });
   }
