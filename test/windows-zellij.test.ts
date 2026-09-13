@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -107,6 +107,24 @@ describe.skipIf(process.platform !== 'win32')('Windows Zellij', () => {
     expect(findWindowsZellijProcess('bmx-test', true)).toBeNull();
     vi.mocked(execFileSync).mockReturnValue(JSON.stringify([{ ...server, command: 'zellij.exe --server C:\\other-session' }, runner, child]) as any);
     expect(findWindowsZellijProcess('bmx-test', true)).toBeNull();
+  });
+
+  it('matches a short socket-directory alias to the canonical server path', async context => {
+    const { dir } = fixture();
+    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+    const shortDir = actual.execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      '(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:BMX_FIXTURE).ShortPath'],
+    { windowsHide: true, encoding: 'utf8', timeout: 10000, env: { ...process.env, BMX_FIXTURE: dir } }).trim();
+    if (shortDir.toLowerCase() === dir.toLowerCase()) context.skip(); // 8.3 names disabled on this volume
+    const sockets = join(realpathSync.native(dir), 'contract_version_1'); mkdirSync(sockets);
+    const marker = join(sockets, 'bmx-test'); writeFileSync(marker, '1234');
+    vi.stubEnv('ZELLIJ_SOCKET_DIR', shortDir);
+    vi.mocked(execFileSync).mockReturnValue(JSON.stringify([
+      { pid: 1234, parent: 1, name: 'zellij.exe', command: `zellij.exe --server "${marker}"`, created: Date.now() - 5000 },
+      { pid: 1235, parent: 1234, name: 'node.exe', command: 'node -e "/* botmux-zellij-pane */"' },
+      { pid: 1236, parent: 1235, name: 'claude.exe' },
+    ]) as any);
+    expect(findWindowsZellijProcess('bmx-test', true)).toBe(1236);
   });
 });
 

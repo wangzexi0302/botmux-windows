@@ -85,7 +85,9 @@ function processTree(pid: number): WindowsProcess[] {
 export function findWindowsZellijProcess(session: string, cli: boolean): number | null {
   if (!session || /[\\/\x00]/.test(session) || session === '.' || session === '..') return null;
   try {
-    const root = realpathSync(process.env.ZELLIJ_SOCKET_DIR ?? join(tmpdir(), 'zellij'));
+    // The JS realpath implementation preserves 8.3 aliases (RUNNER~1), while
+    // Zellij canonicalizes them before constructing the server socket path.
+    const root = realpathSync.native(process.env.ZELLIJ_SOCKET_DIR ?? join(tmpdir(), 'zellij'));
     const matches: number[] = [];
     for (const entry of readdirSync(root, { withFileTypes: true })) {
       if (!entry.isDirectory() || !/^contract_version_\d+$/.test(entry.name)) continue;
