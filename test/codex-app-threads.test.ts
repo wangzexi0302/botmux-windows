@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -10,8 +10,16 @@ import {
 const FAKE_CODEX = resolve('test/fixtures/fake-codex-app-server.mjs');
 const tempDirs: string[] = [];
 
+function fakeCodexBin(dir: string): string {
+  if (process.platform !== 'win32') return FAKE_CODEX;
+  copyFileSync(FAKE_CODEX, join(dir, 'fake-codex.mjs'));
+  const shim = join(dir, 'fake-codex.cmd');
+  writeFileSync(shim, '@echo off\r\n"%_prog%" "%dp0%\\fake-codex.mjs" %*\r\n');
+  return shim;
+}
+
 afterEach(() => {
-  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 function fakeCodexEnv(
@@ -38,7 +46,7 @@ describe('generateCodexAppThreadTitle', () => {
 
     const title = await generateCodexAppThreadTitle({
       sourceText: '请排查 image_safety 为什么没有返回错误码 12008',
-      codexBin: FAKE_CODEX,
+      codexBin: fakeCodexBin(dir),
       env: fakeCodexEnv(dir, {
         FAKE_CODEX_LOG: logPath,
         FAKE_CODEX_ENV_LOG: envLogPath,
@@ -137,7 +145,7 @@ describe('generateCodexAppThreadTitle', () => {
 
     const title = await generateCodexAppThreadTitle({
       sourceText: '排查登录失败',
-      codexBin: FAKE_CODEX,
+      codexBin: fakeCodexBin(dir),
       env: fakeCodexEnv(dir, {
         FAKE_CODEX_LOG: logPath,
         FAKE_CODEX_FINAL_TEXT: JSON.stringify({ title: 'x'.repeat(37) }),
@@ -161,7 +169,7 @@ describe('generateCodexAppThreadTitle', () => {
 
     const title = await generateCodexAppThreadTitle({
       sourceText: '这个标题生成永远不会完成',
-      codexBin: FAKE_CODEX,
+      codexBin: fakeCodexBin(dir),
       env: fakeCodexEnv(dir, {
         FAKE_CODEX_LOG: logPath,
         FAKE_CODEX_PID_PATH: pidPath,
@@ -209,7 +217,7 @@ describe('setCodexAppThreadName', () => {
     await setCodexAppThreadName({
       threadId: 'thread-existing',
       name: '[BotMux·Lark] 排查这个问题',
-      codexBin: FAKE_CODEX,
+      codexBin: fakeCodexBin(dir),
       cwd: dir,
       env: { ...process.env, FAKE_CODEX_LOG: logPath },
       timeoutMs: 20_000,
@@ -236,7 +244,7 @@ describe('setCodexAppThreadName', () => {
     await setCodexAppThreadName({
       threadId: 'thread-delayed-preview',
       name: '[BotMux·Lark] 最终标题',
-      codexBin: FAKE_CODEX,
+      codexBin: fakeCodexBin(dir),
       cwd: dir,
       env: {
         ...process.env,
@@ -264,7 +272,7 @@ describe('setCodexAppThreadName', () => {
     await setCodexAppThreadName({
       threadId: 'thread-loading',
       name: '[BotMux·Lark] 离线推荐任务',
-      codexBin: FAKE_CODEX,
+      codexBin: fakeCodexBin(dir),
       cwd: dir,
       env: {
         ...process.env,
@@ -300,7 +308,7 @@ describe('setCodexAppThreadName', () => {
     await expect(setCodexAppThreadName({
       threadId: 'thread-unavailable',
       name: '[BotMux·Lark] 不应写入',
-      codexBin: FAKE_CODEX,
+      codexBin: fakeCodexBin(dir),
       cwd: dir,
       env: {
         ...process.env,
@@ -327,7 +335,7 @@ describe('setCodexAppThreadName', () => {
     await setCodexAppThreadName({
       threadId: 'thread-without-preview',
       name: '[BotMux·Lark] 最终标题',
-      codexBin: FAKE_CODEX,
+      codexBin: fakeCodexBin(dir),
       cwd: dir,
       env: {
         ...process.env,
@@ -364,7 +372,7 @@ describe('setCodexAppThreadName', () => {
     await setCodexAppThreadName({
       threadId: 'thread-resumed-title',
       name: '[BotMux·Lark] 恢复后的最终标题',
-      codexBin: FAKE_CODEX,
+      codexBin: fakeCodexBin(dir),
       cwd: dir,
       env: {
         ...process.env,
@@ -394,7 +402,7 @@ describe('setCodexAppThreadName', () => {
     const request = setCodexAppThreadName({
       threadId: 'thread-stuck',
       name: '[BotMux·Lark] 不应卡住',
-      codexBin: FAKE_CODEX,
+      codexBin: fakeCodexBin(dir),
       cwd: dir,
       env: {
         ...process.env,
@@ -434,7 +442,7 @@ describe('setCodexAppThreadName', () => {
     const request = setCodexAppThreadName({
       threadId: 'thread-force-close',
       name: '[BotMux·Lark] 进程退出回收',
-      codexBin: FAKE_CODEX,
+      codexBin: fakeCodexBin(dir),
       cwd: dir,
       env: {
         ...process.env,

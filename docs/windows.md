@@ -17,6 +17,7 @@ Codex / Claude Code 共用的启动处理。Windows 默认使用 PTY，Linux/mac
 这是开发中的原生适配。已验证 **飞书私聊 → 原生 Codex CLI → 飞书文字回复**；
 Claude Code 的飞书完整链路仍待验证。版本 smoke 不调用模型；输入 smoke 只检查
 真实 Codex 输入框，不提交 prompt。
+2026-09-13 本机 Claude Code 已登录，模型请求测试遇到服务端 HTTP 503，尚未取得成功响应。
 Windows 上的完整单元测试套件、活跃 CLI 会话关闭时的进程清理、CLI hooks 和
 会话恢复仍需继续验证。PTY 会话不跨 daemon 重启存活；tmux /adopt、Unix 文件沙盒、
 Windows 单文件发行包和 Electron 安装包均不在本阶段支持范围。
@@ -54,6 +55,8 @@ ConPTY 输入为 BMP Unicode 字符发送显式 Win32 Unicode 按键，保留中
 破折号与箭头；连续字符发送按下/抬起事件，emoji 保留完整代理对。避免 native
 Codex 丢弃部分字符后，历史记录与原消息不一致而触发 `submit_unconfirmed`。
 Windows 会话提示使用 PowerShell 与 `botmux.cmd`，多行正文写 UTF-8 文件后发送。
+Codex 标题读取/同步同样解析 npm 启动器；关闭辅助进程时等待 Windows 释放管道与
+工作目录句柄，再清理临时目录。
 
 Windows 的 supervisor 通过本地命令队列轮询处理单机器人操作，通过绑定 PID 和
 启动时间的停止请求退出整组服务；自有 daemon/dashboard 子进程通过 Node IPC

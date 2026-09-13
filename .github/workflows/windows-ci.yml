@@ -50,3 +50,5 @@ jobs:
         run: node --test test/sync-upstream.test.mjs
       - name: Verify supervisor lifecycle and native Windows control
         run: bun run test -- test/windows-supervisor-control.test.ts test/fleet-supervisor.integration.test.ts test/index-supervisor-env-boundary.test.ts test/fleet-command-queue.test.ts
+      - name: Verify Codex title helper process lifecycle
+        run: bun run test -- test/codex-app-threads.test.ts

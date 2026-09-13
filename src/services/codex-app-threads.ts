@@ -3,6 +3,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } f
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveCommand } from '../adapters/cli/registry.js';
+import { resolveExecutableLaunch } from '../utils/pty-launch.js';
 
 type JsonObject = Record<string, any>;
 
@@ -147,6 +148,7 @@ export interface CodexAppThreadMetadata {
 
 class CodexAppServerProbe {
   private child: ChildProcessWithoutNullStreams;
+  private childClosed: Promise<void>;
   private nextId = 1;
   private stdoutBuffer = '';
   private pending = new Map<number, PendingRequest>();
@@ -168,11 +170,19 @@ class CodexAppServerProbe {
     registerForceClose?: (forceClose: () => void) => (() => void),
   ) {
     this.useProcessGroup = detached && process.platform !== 'win32';
-    this.child = spawn(codexBin, ['app-server', '--listen', 'stdio://'], {
+    const launch = resolveExecutableLaunch(codexBin, ['app-server', '--listen', 'stdio://'], env);
+    this.child = spawn(launch.bin, launch.args, {
       cwd,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: this.useProcessGroup,
+      windowsHide: true,
+    });
+    this.childClosed = new Promise(resolve => this.child.once('close', () => resolve()));
+    this.child.stdin.on('error', err => {
+      if (this.closed) return;
+      this.failAll(err);
+      this.close();
     });
     this.unregisterForceClose = registerForceClose?.(() => this.forceClose());
     this.child.stdout.on('data', chunk => this.onStdout(chunk.toString('utf8')));
@@ -344,6 +354,7 @@ class CodexAppServerProbe {
     if (this.closed) return;
     this.closed = true;
     this.detachAbortHandler();
+    this.child.stdin.end();
     this.killChildGroup('SIGTERM');
     this.killTimer = setTimeout(() => {
       if (this.child.exitCode === null && this.child.signalCode === null) {
@@ -358,10 +369,18 @@ class CodexAppServerProbe {
     if (this.killTimer) clearTimeout(this.killTimer);
     this.closed = true;
     this.detachAbortHandler();
+    this.child.stdin.destroy();
     if (this.child.exitCode === null && this.child.signalCode === null) {
       this.killChildGroup('SIGKILL');
     }
     this.failAll(new Error('Codex app-server probe force-closed'));
+  }
+
+  async closeAndWait(): Promise<void> {
+    this.close();
+    // Windows retains a process's cwd until exit/pipe handles are released.
+    // Wait before removing the scratch directory; POSIX behavior stays intact.
+    if (process.platform === 'win32') await this.withTimeout(this.childClosed, 5000, 'close');
   }
 
   async withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -664,9 +683,9 @@ export async function generateCodexAppThreadTitle(
     if (threadId && client) {
       try { await client.cleanupTitleThread(threadId); } catch { /* 临时标题失败不能影响主会话 */ }
     }
-    client?.close();
+    await client?.closeAndWait();
     if (scratchDir) {
-      try { rmSync(scratchDir, { recursive: true, force: true }); } catch { /* 临时目录稍后由系统清理 */ }
+      try { rmSync(scratchDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* 临时目录稍后由系统清理 */ }
     }
   }
 }
@@ -690,7 +709,7 @@ export async function listCodexAppThreads(opts: ListCodexAppThreadsOptions = {})
     const normalized: Array<CodexAppThreadSummary | null> = rows.map((row: JsonObject) => normalizeThread(row));
     return normalized.filter((thread): thread is CodexAppThreadSummary => !!thread);
   } finally {
-    client.close();
+    await client.closeAndWait();
   }
 }
 
@@ -726,7 +745,7 @@ export async function setCodexAppThreadName(opts: SetCodexAppThreadNameOptions):
     }
     throw new Error('Codex app-server thread name did not persist after 3 attempts');
   } finally {
-    client.close();
+    await client.closeAndWait();
   }
 }
 
@@ -749,6 +768,6 @@ export async function readCodexAppThreadMetadata(
     await client.initialize(timeoutMs);
     return await client.readThreadMetadata(opts.threadId, timeoutMs);
   } finally {
-    client.close();
+    await client.closeAndWait();
   }
 }
