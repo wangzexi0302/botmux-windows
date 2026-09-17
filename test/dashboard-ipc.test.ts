@@ -1831,6 +1831,47 @@ describe('PUT /api/bot-card-prefs — Codex App clean history', () => {
   });
 });
 
+describe('PUT /api/bot-card-prefs — two reply modes', () => {
+  it('accepts default and unified modes and rejects the retired final-only option', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dashboard-ipc-reply-modes-'));
+    const configPath = join(dir, 'bots.json');
+    const appId = 'test-reply-modes-app';
+    const prevBotsConfig = process.env.BOTS_CONFIG;
+    try {
+      process.env.BOTS_CONFIG = configPath;
+      writeFileSync(configPath, JSON.stringify([{
+        larkAppId: appId, larkAppSecret: 'secret', cliId: 'codex',
+      }]));
+      loadBotConfigs().forEach((c: any) => registerBot(c));
+      setLarkAppId(appId);
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+      const url = `http://127.0.0.1:${handle.port}/api/bot-card-prefs`;
+      for (const mode of ['unified', 'legacy']) {
+        const result = await fetch(url, {
+          method: 'PUT', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ replyCardMode: mode }),
+        });
+        expect(result.status).toBe(200);
+        expect(await result.json()).toMatchObject({ ok: true, replyCardMode: mode });
+        expect(getBot(appId).config.replyCardMode).toBe(mode === 'legacy' ? undefined : mode);
+      }
+      const retired = await fetch(url, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ replyCardMode: 'final-only' }),
+      });
+      expect(retired.status).toBe(400);
+      expect(await retired.json()).toMatchObject({ error: 'invalid_reply_card_mode' });
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].replyCardMode).toBeUndefined();
+    } finally {
+      if (handle) await handle.close();
+      handle = null;
+      if (prevBotsConfig === undefined) delete process.env.BOTS_CONFIG;
+      else process.env.BOTS_CONFIG = prevBotsConfig;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('PUT /api/bot-card-prefs — streaming card buttons', () => {
   it('persists known button ids canonically, clears them, and rejects unknown ids', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dashboard-ipc-streaming-buttons-'));
@@ -7857,6 +7898,7 @@ describe('GET /api/groups (Phase B)', () => {
       expect(res.json.chats).toEqual([{
         chatId: 'oc_master_off',
         name: 'master off',
+        agentCliId: 'codex',
         oncallChat: null,
         firstSeenAt: null,
         hasRole: false,
@@ -7899,6 +7941,7 @@ describe('GET /api/groups (Phase B)', () => {
       expect(res.json.chats).toEqual([{
         chatId: 'oc_master_off_chat_off',
         name: 'master off chat off',
+        agentCliId: 'codex',
         oncallChat: null,
         firstSeenAt: null,
         hasRole: false,
@@ -7977,6 +8020,7 @@ describe('GET /api/groups (Phase B)', () => {
         {
           chatId: 'oc_master_off',
           name: 'master off',
+          agentCliId: 'codex',
           oncallChat: null,
           firstSeenAt: null,
           hasRole: false,
@@ -7989,6 +8033,7 @@ describe('GET /api/groups (Phase B)', () => {
         {
           chatId: 'oc_master_on_chat_off',
           name: 'chat off',
+          agentCliId: 'codex',
           oncallChat: null,
           firstSeenAt: null,
           hasRole: false,
@@ -8001,6 +8046,7 @@ describe('GET /api/groups (Phase B)', () => {
         {
           chatId: 'oc_master_on_chat_on',
           name: 'chat on',
+          agentCliId: 'codex',
           oncallChat: null,
           firstSeenAt: null,
           hasRole: false,
@@ -9443,6 +9489,46 @@ describe('core-only public routes + readiness barrier (behavioral)', () => {
       if (prevCoreOnly === undefined) delete process.env.BOTMUX_CORE_ONLY;
       else process.env.BOTMUX_CORE_ONLY = prevCoreOnly;
       findSpy.mockRestore();
+    }
+  });
+});
+
+describe('group default model configuration', () => {
+  it('validates, saves, reads back and clears the exact group on the current bot', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'group-model-ipc-'));
+    const configPath = join(dir, 'bots.json');
+    const previous = process.env.BOTS_CONFIG;
+    try {
+      process.env.BOTS_CONFIG = configPath;
+      writeFileSync(configPath, JSON.stringify([{ larkAppId: 'app-models', larkAppSecret: 'test', cliId: 'codex' }]));
+      loadBotConfigs().forEach(c => registerBot(c));
+      setLarkAppId('app-models');
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+      const put = (body: unknown) => fetch(`http://127.0.0.1:${handle!.port}/api/group-default-models/oc_model`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      });
+      const models = { codex: { model: 'gpt-5.6-sol', reasoningEffort: 'ultra' }, 'claude-code': 'sonnet' };
+      const saved = await put(models);
+      expect(saved.status).toBe(200);
+      expect(await saved.json()).toEqual({ ok: true, models });
+      expect(getBot('app-models').config.groupDefaultModels?.oc_model?.codex).toEqual(models.codex);
+      expect(getBot('app-models').config.cliId).toBe('codex');
+      const list = vi.spyOn(groupsStore, 'listChats').mockResolvedValue([{ chatId: 'oc_model', name: 'Example', chatMode: 'topic' }] as any);
+      const chats = await (await fetch(`http://127.0.0.1:${handle.port}/api/groups`)).json();
+      expect(chats.chats[0].defaultModels).toEqual(models);
+      expect(chats.chats[0].agentCliId).toBe('codex');
+      list.mockRestore();
+      const before = readFileSync(configPath, 'utf8');
+      expect((await put({ gemini: 'flash' })).status).toBe(400);
+      expect((await put(null)).status).toBe(400);
+      expect((await put({codex:{model:'gpt-5.5',reasoningEffort:'ultra'}})).status).toBe(400);
+      expect(readFileSync(configPath, 'utf8')).toBe(before);
+      expect((await put({})).status).toBe(200);
+      expect(JSON.parse(readFileSync(configPath, 'utf8'))[0].groupDefaultModels).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.BOTS_CONFIG;
+      else process.env.BOTS_CONFIG = previous;
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { CLI_MODEL_CHOICES } from './model-choices.js';
 import { resolveCommand } from './registry.js';
 import { resolveExecutableLaunch } from '../../utils/pty-launch.js';
 import { BOTMUX_SHELL_HINTS } from './shared-hints.js';
@@ -178,11 +179,17 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
     authPaths: ['~/.codex'],
     get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
 
-    buildArgs({ sessionId, resume, resumeSessionId, forkSession, workingDir, model, reasoningEffort, disableCliBypass, bypassHookTrust, readIsolation, remoteWsUrl, remoteThreadId, shellSubprocessEnv }) {
+    buildArgs({ sessionId, resume, resumeSessionId, quietResume, forkSession, workingDir, model, reasoningEffort, disableCliBypass, bypassHookTrust, hideRateLimitModelNudge, readIsolation, remoteWsUrl, remoteThreadId, shellSubprocessEnv }) {
       // Hybrid RPC input mode: attach this TUI to the botmux-owned app-server
       // thread. User input is delivered out-of-band via JSON-RPC (turn/start,
       // see codex-rpc-engine + worker), so the pane is a pure viewer — no paste
       // path, no history.jsonl verify. --no-alt-screen keeps pane capture working.
+      // A submit Enter can accept Codex's low-quota picker (default: switch).
+      // Suppress it at the TUI boundary, including the RPC viewer. Keep this
+      // independent of approval/sandbox bypass and leave user config untouched.
+      const modelNudgeArgs = hideRateLimitModelNudge
+        ? ['-c', 'notice.hide_rate_limit_model_nudge=true']
+        : [];
       if (remoteWsUrl && remoteThreadId) {
         // -c check_for_update_on_startup=false: an RPC pane is a pure viewer with
         // NO terminal input path, so codex's interactive "Update available … Press
@@ -197,7 +204,8 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
         // it suppressed like the startup update picker.
         return ['--remote', remoteWsUrl, 'resume', '--no-alt-screen',
           '-c', 'check_for_update_on_startup=false',
-          '-c', 'notice.hide_rate_limit_model_nudge=true',
+          ...modelNudgeArgs,
+          ...(quietResume ? ['-c', 'tui.auto_recap=false'] : []),
           remoteThreadId];
       }
       // Read isolation for Codex is enforced by the worker's Seatbelt wrapper,
@@ -241,8 +249,7 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
         // (never show again)"; never written to the user's global config. Added
         // on BOTH TUI launch shapes (this plain pane and the --remote viewer
         // above); app-server/runner CLIs render no TUI popup and need no flag.
-        '-c',
-        'notice.hide_rate_limit_model_nudge=true',
+        ...modelNudgeArgs,
       ];
       // Under read isolation the worker denies bots.json, so `botmux send` (a shell
       // subprocess) registers this bot from the worker-written cred FILE, keyed by
@@ -298,7 +305,8 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
       // privilege-escalation guard on fork. Falls back to plain `resume` when we
       // somehow lack a source id (nothing to fork from).
       const codexArgs = codexSessionId
-        ? [forkSession ? 'fork' : 'resume', ...baseArgs, codexSessionId]
+        ? [forkSession ? 'fork' : 'resume', ...baseArgs,
+          ...(quietResume && !forkSession ? ['-c', 'tui.auto_recap=false'] : []), codexSessionId]
         : freshArgs;
       return codexArgs;
     },
@@ -496,7 +504,7 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
     get skillsDir(): string { return join(codexHome(), 'skills'); },
     // 静态列表是 `codex debug models` visibility=list 的快照（2026-08）；
     // live 探测（detectModels）会补充目录增量，live 不可用时以此兜底。
-    modelChoices: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.2'],
+    modelChoices: CLI_MODEL_CHOICES['codex'],
     // Live 模型枚举：`codex debug models`（官方支持，"Render the raw model
     // catalog as JSON"）输出与 traex 同构的 JSON 目录，复用共享解析。整包可达
     // 数百 KB，故 maxBuffer 给到 16MB、8s 超时兜底。仅 dashboard 在用户选中

@@ -21,7 +21,7 @@ Just send these commands directly in a topic, and the daemon intercepts and hand
 | `/rename <title>` | Rename this Botmux session and sync the running Codex/Claude native session name |
 | `/fork --create <new group name>` | Clone the current idle session into a newly-created group while leaving the source session untouched (Claude family / Codex terminal mode; invoke inside the source session's topic) |
 | `/card` | Manually summon the current session's streaming card (can summon and restore live refresh even when streaming is off; in private-card mode, sends a static snapshot visible only to authorized users instead). `/card off` and `/card on` toggle streaming cards for this chat; `/card pin off`, `/card pin on`, and `/card pin status` control the per-chat streaming-card Pin override |
-| `/cot` | Thinking-process message switch: `/cot off` mutes this chat's thinking bubble, `/cot on` restores it, `/cot show` summons a one-off peek at the current turn's bubble while the switches are off, `/cot status` reports the state (bot-level master switch `thinkingCard`, on by default; claude-code / codex only) |
+| `/cot` | Thinking-process message switch: `/cot off` mutes this chat's thinking bubble, `/cot on` restores it, `/cot show` summons a one-off peek at the current turn's bubble while the switches are off, `/cot status` reports the state (bot-level master switch `thinkingCard`, on by default; supports claude-code / codex / traex) |
 | `/term` | Get the operable (write-enabled) terminal link for this session, delivered privately to the owner (visible-to-you in-chat, falling back to DM in topic/p2p — never exposed in the group) |
 | `/quote` | Pop a picker of this chat's topics; choosing one reads that topic's transcript into the current session. This fills a gap in Feishu itself — its quote-reply UI can only reference a single message, never a whole topic. The bot replies with a short acknowledgement (how many messages, time span, subject) and waits for your next instruction |
 | `/quote <instruction>` | Same, but runs your instruction as soon as you pick a topic, saving a round trip. The transcript is still injected explicitly labelled as material rather than instructions |
@@ -102,6 +102,27 @@ Controls how the bot opens a session when @mentioned. No argument (or `status`) 
 The group-level setting overrides the dashboard "Bot Config → Regular Group Mode" default.
 
 `/substitute [status|on|off]` — show or toggle **substitute mode** for the current group (owner-only to change).
+
+## 📑 Chat Tabs
+
+| Command | Description |
+|------|------|
+| `/tabs` / `/tab` / `/tabs list` | List every tab in the current chat and its Tab ID (`/tab` is a compatibility alias) |
+| `/tabs add <url> [name]` | Add a URL tab (owner or authorized operator required) |
+| `/tabs rename <tab_id> <name>` | Rename an editable URL or document tab |
+| `/tabs delete <tab_id>` | Delete an editable URL or document tab |
+| `/tabs sort <tab_id> ...` | Reorder tabs; the command must include every Tab ID returned by `/tabs` |
+
+Built-in Lark tabs are read-only through OpenAPI, though they must still be included when sorting. If the chat only allows its owner and administrators to manage tabs, the bot also needs that chat-level privilege.
+
+AI agents and background scripts should use the CLI instead of sending a slash command into the chat:
+
+```bash
+botmux tabs add "https://example.com/project/releases/2026" \
+  --name "Project release" --json
+```
+
+The CLI resolves the bot and chat from the current `BOTMUX_SESSION_ID`. Use `--session-id` outside the current process tree or `--chat-id` to override the destination. `add` is idempotent by URL: an existing page tab is reused and renamed when needed. This works for merge requests, project boards, release pages, and other automation scenarios. Background callers can also use `botmux tabs list|update|remove|sort`.
 
 ## 🔀 Passthrough to the Underlying CLI
 

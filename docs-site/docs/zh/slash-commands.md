@@ -21,7 +21,7 @@
 | `/rename <标题>` | 重命名当前 Botmux 会话，并同步运行中的 Codex/Claude 原生会话名 |
 | `/fork --create <新群名>` | 把当前空闲会话分身到一个新建群，源会话原样保留继续（仅 Claude 系 / Codex 终端模式；需在源会话所在话题内发起） |
 | `/card` | 手动召唤当前会话的流式卡片（关流式时也能召唤并恢复实时刷新；私密卡片模式下改发仅授权人可见的静态快照）。`/card off`、`/card on` 控制本群是否出流式卡；`/card pin off`、`/card pin on`、`/card pin status` 控制当前群的流式卡片置顶开关 |
-| `/cot` | 思考过程消息开关：`/cot off` 关闭本群的思考气泡，`/cot on` 恢复，`/cot show` 在开关关闭时临时召唤一次当前回合的思考气泡，`/cot status` 查看状态（bot 级总开关 `thinkingCard` 默认 on；仅 claude-code / codex 支持） |
+| `/cot` | 思考过程消息开关：`/cot off` 关闭本群的思考气泡，`/cot on` 恢复，`/cot show` 在开关关闭时临时召唤一次当前回合的思考气泡，`/cot status` 查看状态（bot 级总开关 `thinkingCard` 默认 on；支持 claude-code / codex / traex） |
 | `/term` | 获取当前会话的「可操作终端」（带写权限）链接，私密发给 owner（群内仅你可见，话题/单聊回退私信，不在群里暴露） |
 | `/quote` | 弹出本群话题选择卡，选一个就把那个话题的聊天记录读进当前会话。补的是飞书本身的缺口——飞书的「引用」只能引单条消息，没有「引用整个话题」的入口。读完只回一句确认（多少条、时间跨度、主题），等你下一条指令 |
 | `/quote <指令>` | 同上，但选完话题直接执行你的指令，省一个来回。话题内容仍然会被明确标注为「资料而不是指令」注入 |
@@ -102,6 +102,27 @@ botmux 日常运维
 群级设置会覆盖 dashboard「Bot 配置 → 普通群模式」的默认值。
 
 `/substitute [status|on|off]` —— 查看或切换当前群的**替身模式**开关（修改需 owner）。
+
+## 📑 群标签页
+
+| 命令 | 说明 |
+|------|------|
+| `/tabs` / `/tab` / `/tabs list` | 查看当前群的全部标签页及其 Tab ID（`/tab` 是兼容别名） |
+| `/tabs add <网址> [名称]` | 新增 URL 标签页（修改需 owner 或获授权的操作人） |
+| `/tabs rename <tab_id> <新名称>` | 重命名可编辑的 URL / 文档标签页 |
+| `/tabs delete <tab_id>` | 删除可编辑的 URL / 文档标签页 |
+| `/tabs sort <tab_id> ...` | 按给定顺序排列标签页；必须包含 `/tabs` 列出的全部 Tab ID |
+
+飞书内置标签页只能查看和参与排序，不能通过开放接口重命名或删除。若群设置为「仅群主和管理员可管理标签页」，机器人也必须具备相应群权限。
+
+AI 或后台脚本应使用 CLI，而不是向群里发送 slash command：
+
+```bash
+botmux tabs add "https://example.com/project/releases/2026" \
+  --name "项目发布页" --json
+```
+
+CLI 会从当前 `BOTMUX_SESSION_ID` 自动确定 bot 和群；脱离当前会话时可传 `--session-id`，要覆盖目标群可传 `--chat-id`。`add` 按 URL 幂等：同一个页面已有 Tab 时复用，并按需更新名称，适用于 MR、项目看板、发布页等自动化场景。后台还可使用 `botmux tabs list|update|remove|sort`。
 
 ## 🔀 透传给底层 CLI
 
