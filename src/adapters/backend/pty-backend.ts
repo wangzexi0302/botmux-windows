@@ -1,3 +1,4 @@
+import { botInjectedEnv } from '../../core/env-policy.js';
 import * as pty from 'node-pty';
 import { chmodSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -34,7 +35,7 @@ export class PtyBackend implements SessionBackend {
       `[pty] spawn bin=${bin} args=${JSON.stringify(args)} ` +
       `cwd=${opts.cwd} ${opts.cols}x${opts.rows}`,
     );
-    const env = opts.injectEnv ? { ...opts.env, ...opts.injectEnv } : opts.env;
+    const env = opts.injectEnv ? { ...opts.env, ...(opts.strictEnv ? botInjectedEnv(opts.injectEnv, { mode: 'strict' }) : opts.injectEnv) } : opts.env;
     const launch = resolvePtyLaunch(bin, args, env);
     this.process = pty.spawn(launch.bin, launch.args, {
       name: 'xterm-256color',

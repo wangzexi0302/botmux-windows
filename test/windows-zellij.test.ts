@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, toNamespacedPath } from 'node:path';
 
 vi.mock('node:child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -60,6 +60,24 @@ describe.skipIf(process.platform !== 'win32')('Windows Zellij', () => {
     expect(spec.env.__OWNER_OPEN_ID).toBeUndefined();
   });
 
+  it('applies strict injection redaction and Codex instance authority to a native pane', () => {
+    const { dir, shim } = fixture();
+    const opts = { cwd: dir, cols: 100, rows: 30, strictEnv: true,
+      env: { PATH: process.env.PATH!, BOTMUX_OWNER_OPEN_ID: 'owner', BOTMUX_CODEX_INSTANCE_BINDING: 'binding' },
+      injectEnv: { github_token: 'daemon-secret', botmux_owner_open_id: 'forged', CODEX_HOME: 'wrong',
+        openai_api_key: 'wrong-instance', CODEX_API_KEY: 'wrong-instance', OPENAI_BASE_URL: 'wrong-instance',
+        ANTHROPIC_AUTH_TOKEN: 'explicit-bot-auth' } };
+    const pane = buildWindowsZellijPane(shim, ['中文'], opts, join(dir, 'launch.json'));
+    const env = JSON.parse(pane.bootstrap).env;
+    expect(env.BOTMUX_OWNER_OPEN_ID).toBe('owner');
+    expect(env.__OWNER_OPEN_ID).toBe('owner');
+    expect(env.TERM).toBe('xterm-256color');
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe('explicit-bot-auth');
+    for (const key of ['GITHUB_TOKEN', 'CODEX_HOME', 'OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_BASE_URL']) expect(env[key], key).toBeUndefined();
+    expect(buildLayoutString(shim, ['中文'], opts, join(dir, 'launch.json'))).not.toContain('/usr/bin/env');
+    expect(() => buildWindowsZellijPane(shim, [], { ...opts, injectEnv: { AUTH: 'invalid\0value' } }, join(dir, 'launch.json'))).toThrow('invalid value');
+  });
+
   it('scrubs session/provider authority from the server environment', () => {
     const env = zellijEnv({ Path: 'C:\\bin', BOTMUX_OWNER_OPEN_ID: 'owner', __OWNER_OPEN_ID: 'owner',
       LARK_APP_SECRET: 'secret', ZELLIJ: '0', zellij_session_name: 'outer', ZELLIJ_PANE_ID: '2', HTTPS_PROXY: 'secret-proxy' });
@@ -91,13 +109,14 @@ describe.skipIf(process.platform !== 'win32')('Windows Zellij', () => {
     expect(execFileSync).not.toHaveBeenCalled();
   });
 
-  it('rejects stale PID markers and only resolves a unique pane launcher child', () => {
+  it.each([false, true])('rejects stale PID markers and only resolves a unique pane launcher child (path alias=%s)', (pathAlias) => {
     const { dir } = fixture();
     // Match Zellij's canonical --server argv even when TEMP uses RUNNER~1.
     const sockets = join(realpathSync.native(dir), 'contract_version_1'); mkdirSync(sockets);
     const marker = join(sockets, 'bmx-test'); writeFileSync(marker, '1234');
     vi.stubEnv('ZELLIJ_SOCKET_DIR', dir);
-    const server = { pid: 1234, parent: 1, name: 'zellij.exe', command: `zellij.exe --server "${marker}"`, created: Date.now() - 5000 };
+    const serverMarker = pathAlias ? toNamespacedPath(marker) : marker;
+    const server = { pid: 1234, parent: 1, name: 'zellij.exe', command: `zellij.exe --server "${serverMarker}"`, created: Date.now() - 5000 };
     const runner = { pid: 1235, parent: 1234, name: 'node.exe', command: 'node -e "/* botmux-zellij-pane */"' };
     const child = { pid: 1236, parent: 1235, name: 'claude.exe' };
     vi.mocked(execFileSync).mockReturnValue(JSON.stringify([server, runner, child]) as any);
@@ -107,6 +126,9 @@ describe.skipIf(process.platform !== 'win32')('Windows Zellij', () => {
     vi.mocked(execFileSync).mockReturnValue(JSON.stringify([server, runner, child, { ...child, pid: 1237 }]) as any);
     expect(findWindowsZellijProcess('bmx-test', true)).toBeNull();
     vi.mocked(execFileSync).mockReturnValue(JSON.stringify([{ ...server, command: 'zellij.exe --server C:\\other-session' }, runner, child]) as any);
+    expect(findWindowsZellijProcess('bmx-test', true)).toBeNull();
+    const otherMarker = join(sockets, 'bmx-other'); writeFileSync(otherMarker, '1234');
+    vi.mocked(execFileSync).mockReturnValue(JSON.stringify([{ ...server, command: `zellij.exe --server "${otherMarker}"` }, runner, child]) as any);
     expect(findWindowsZellijProcess('bmx-test', true)).toBeNull();
   });
 

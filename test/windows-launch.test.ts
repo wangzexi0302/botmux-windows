@@ -8,6 +8,7 @@ import { resolveExecutableLaunch, resolvePtyLaunch } from '../src/utils/pty-laun
 import { createCliAdapterSync, resolveCommand } from '../src/adapters/cli/registry.js';
 import { detectDefaultBackend } from '../src/config.js';
 import { PtyBackend } from '../src/adapters/backend/pty-backend.js';
+import { isBunRuntime } from './helpers/ts-runner.js';
 
 const roots: string[] = [];
 function temp() {
@@ -78,9 +79,12 @@ describe.skipIf(process.platform !== 'win32')('Windows executable resolution', (
 });
 
 // A real ConPTY/POSIX PTY, with arguments observed by the child, not a spawn mock.
+// Direct node-pty under Bun can exit with code 0 / signal 1 before any output
+// (also documented in child-env.test.ts). Native transport runs in the blocking
+// Node Windows/Linux jobs; discovery and launcher tests still run under Bun.
 describe('PTY launch and lifecycle', () => {
   for (const npmShim of (process.platform === 'win32' ? [false, true] : [false])) {
-    it(`round-trips Unicode/quoted argv, env and input (${npmShim ? 'npm shim' : 'native'})`, async () => {
+    it.skipIf(isBunRuntime())(`round-trips Unicode/quoted argv, env and input (${npmShim ? 'npm shim' : 'native'})`, async () => {
       const root = temp();
       const entry = join(root, 'entry.cjs');
       const result = join(root, 'result.json');

@@ -72,7 +72,7 @@ describe('worker raw_input handler', () => {
 });
 
 describe('worker adopt/native-rename coordination', () => {
-  const messageRegion = caseRegion(workerSrc, "case 'message':", 6500);
+  const messageRegion = caseRegion(workerSrc, "case 'message':", 8500);
   const flushRegion = caseRegion(workerSrc, 'async function flushPending()', 16000);
 
   it('parks ordinary adopt messages for the full native-rename settle window', () => {
@@ -677,7 +677,7 @@ describe('late bare-shell launch recovery', () => {
   });
 
   it('generation-fences PTY data before it can feed the active idle detector', () => {
-    const wiring = caseRegion(workerSrc, 'const observedBackend = backend;', 3400);
+    const wiring = caseRegion(workerSrc, 'const observedBackend = backend;', 6500);
     const onData = wiring.indexOf('observedBackend.onData((data) =>');
     const fence = wiring.indexOf('if (backend !== observedBackend) return;', onData);
     const feed = wiring.indexOf('onPtyData(data)', fence);

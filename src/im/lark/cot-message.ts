@@ -18,8 +18,10 @@
  *   2. Subsequent updates → PUT AG-UI events. The worker sends the FULL
  *      cumulative ENTRY LIST (thinking paragraphs + tool calls/results in
  *      transcript order, append-only); this module pushes each unseen entry
- *      as its own node — thinking as a reasoning message (START/CONTENT/END
- *      with a distinct messageId), tool calls as TOOL_CALL_START/ARGS/END,
+ *      as its own node — thinking AND interim assistant narration as reasoning
+ *      messages (START/CONTENT/END with a distinct messageId; a turn that
+ *      starts straight into tooling gets one placeholder node first, see
+ *      {@link thinkingPlaceholderEvents}), tool calls as TOOL_CALL_START/ARGS/END,
  *      tool output as TOOL_CALL_RESULT. The client does not render
  *      TOOL_CALL_ARGS (verified by live A/B: sending full args and sending
  *      none render identically), so the command line / file path travels in
@@ -35,10 +37,8 @@
  * Strictly cosmetic: every network call catches its own errors and never
  * touches turn settlement.
  *
- * Per-bot master switch `thinkingCard` (default ON — only an explicit false
- * disables; per-chat opt-out via `/cot off`). `thinkingCardToolResult: false`
- * additionally drops the TOOL_CALL_RESULT code blocks, see
- * {@link cotToolResultEnabled}.
+ * Per-bot master switch `cotEnabled` (default ON — only an explicit false
+ * disables; per-chat opt-out via `/cot off`).
  */
 import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -103,14 +103,14 @@ function rememberRecentState(ds: DaemonSession, state: CotState): void {
 }
 
 /**
- * 新 turn 的 thinking 到来时，上一轮的气泡若还活着（已创建、未收尾），必须在这里
+ * 新 turn 的 thinking 到来，或队列确认 steer 替换旧 turn 时，旧气泡若还活着，必须在这里
  * 主动收尾，而不是把 state 一丢了之：丢掉之后没有任何路径会再给它 RUN_FINISHED——
  * 它自己的 turn_terminal 已经（或将要）因 state 被替换而找不到对象，气泡就永远停在
  * 「执行中」。实测触发场景：上一轮跑得久，用户 type-ahead 发了下一条，Claude 无缝
  * 接着跑，两轮之间没有 idle 边沿。
  *
- * 下一轮的 thinking 已经出现，本身就证明上一轮结束了，所以按 done 收尾；若上一轮
- * 曾经推送失败（disabled），走显式 complete 让它停止转圈。
+ * done 只表示旧时间线的展示结束，不证明旧任务执行成功；steer 会把工作合入新回合。
+ * 若上一轮曾经推送失败（disabled），走显式 complete 让它停止转圈。
  */
 function settleSupersededState(ds: DaemonSession, state: CotState): void {
   if (state.settled) return;
@@ -230,7 +230,7 @@ function turnKeyOf(msg: { turnId: string; dispatchAttempt?: number }): string {
   return `${msg.turnId}|${msg.dispatchAttempt ?? ''}`;
 }
 
-/** Effective per-session gate: bot-level master switch (`thinkingCard`,
+/** Effective per-session gate: bot-level master switch (`cotEnabled`,
  *  default ON — only explicit false disables) AND the chat not opted out via
  *  `/cot off` (`noCotChats`). Read fresh from the in-memory registry so
  *  `/cot` toggles apply from the next update without a daemon restart.
@@ -241,7 +241,7 @@ export function cotEnabled(ds: DaemonSession): boolean {
     const cfg = getBot(ds.larkAppId).config;
     if (cfg.apiOnly === true) return false;
     if (ds.cotForced) return true;
-    return cfg.thinkingCard !== false
+    return cfg.cotEnabled !== false
       && !(ds.chatId && cfg.noCotChats?.includes(ds.chatId));
   } catch {
     return false;
@@ -394,7 +394,7 @@ function reasoningId(state: CotState, index: number): string {
  *  MCP-style names without a per-CLI table. */
 function toolMeta(name: string): { icon: string; labelKey: string } {
   const n = name.toLowerCase();
-  if (n.includes('bash') || n.includes('shell') || n.includes('command')) return { icon: 'bash', labelKey: 'cot.tool.bash' };
+  if (n.includes('bash') || n.includes('shell') || n.includes('command') || /(^|[^a-z])exec([^a-z]|$)/.test(n)) return { icon: 'bash', labelKey: 'cot.tool.bash' };
   if (n.includes('write') || n.includes('edit') || n.includes('patch')) return { icon: 'write', labelKey: 'cot.tool.write' };
   if (n.includes('read') || n.includes('notebook')) return { icon: 'read', labelKey: 'cot.tool.read' };
   if (n.includes('grep') || n.includes('glob') || n.includes('search') || n.includes('fetch')) return { icon: 'search', labelKey: 'cot.tool.search' };
@@ -474,11 +474,41 @@ function resultLanguage(toolName: string | undefined, subject: string | undefine
   return ext ? COT_EXT_LANGUAGES[ext] : undefined;
 }
 
-/** AG-UI events for one CoT entry. Thinking → a complete reasoning message
- *  (its own node); tool_call → START(+ARGS)+END; tool_result → RESULT in
- *  code style (tool output is command/file content — monospace fits). */
+/**
+ * The bubble's opening node for a turn that starts straight into tooling.
+ *
+ * Extended thinking is OFF by default on Claude Code, so a plain turn ships
+ * no `thinking` block at all — its first entry is a tool_call. That left the
+ * bubble with two defects at once: nothing readable at the head (just a row
+ * of tool nodes), and no reasoning node for those nodes to hang under, since
+ * `parentMessageId` is only attached when `lastReasoningId` is set. One
+ * placeholder reasoning node fixes both.
+ *
+ * Inserted at most once per turn — `lastReasoningId` being unset IS the
+ * "this turn has produced no reasoning node yet" test, so a turn whose real
+ * thinking or narration arrives first never sees it. It claims index 0's id,
+ * which is free in exactly that case (no entry-0 reasoning node exists) and
+ * is the same id the prologue's REASONING_START opened the section with.
+ */
+function thinkingPlaceholderEvents(ds: DaemonSession, state: CotState): CotEvent[] {
+  const mid = reasoningId(state, 0);
+  state.lastReasoningId = mid;
+  return [
+    ev('REASONING_MESSAGE_START', { messageId: mid, role: 'reasoning' }),
+    ev('REASONING_MESSAGE_CONTENT', { messageId: mid, delta: t('cot.thinking_placeholder', undefined, localeForBot(ds.larkAppId)) }),
+    ev('REASONING_MESSAGE_END', { messageId: mid }),
+  ];
+}
+
+/** AG-UI events for one CoT entry. Thinking and interim narration (`text`)
+ *  → a complete reasoning message (its own node); tool_call → START(+ARGS)+END,
+ *  preceded by the placeholder node when the turn has no reasoning node yet;
+ *  tool_result → RESULT in code style (tool output is command/file content —
+ *  monospace fits). */
 function entryEvents(ds: DaemonSession, state: CotState, entry: CotEntry, index: number): CotEvent[] {
-  if (entry.kind === 'thinking') {
+  // 两者在气泡里同为 reasoning 段落：thinking 是模型的内心独白，text 是它在工具
+  // 之间写给用户的旁白。渲染一致，但协议上分开，占位判据与未来的差异化留有余地。
+  if (entry.kind === 'thinking' || entry.kind === 'text') {
     const mid = reasoningId(state, index);
     state.lastReasoningId = mid;
     return [
@@ -488,6 +518,9 @@ function entryEvents(ds: DaemonSession, state: CotState, entry: CotEntry, index:
     ];
   }
   if (entry.kind === 'tool_call') {
+    // 必须在构造 TOOL_CALL_START 之前求值：它会补上 lastReasoningId，
+    // 下面的 parentMessageId 才挂得住。
+    const placeholder = state.lastReasoningId ? [] : thinkingPlaceholderEvents(ds, state);
     const meta = toolMeta(entry.name);
     const subject = toolTitleSubject(entry);
     // A tool_result entry carries only {id, result} — no tool name — so the
@@ -495,13 +528,13 @@ function entryEvents(ds: DaemonSession, state: CotState, entry: CotEntry, index:
     // in hand, and remembered for the matching result. Detection uses the
     // UNTRUNCATED subject: a path longer than the title cap still ends in its
     // extension, which the display string has already lost to the ellipsis.
-    // 工具输出关闭时结果不会发出，语言也无需记。
     const lang = resultLanguage(entry.name, subject.full);
-    if (lang && cotToolResultEnabled(ds)) {
+    if (lang) {
       if (!state.resultLanguages) state.resultLanguages = new Map();
       state.resultLanguages.set(entry.id, lang);
     }
     return [
+      ...placeholder,
       ev('TOOL_CALL_START', {
         toolCallId: entry.id,
         icon: meta.icon,
@@ -513,11 +546,8 @@ function entryEvents(ds: DaemonSession, state: CotState, entry: CotEntry, index:
       ev('TOOL_CALL_END', { toolCallId: entry.id }),
     ];
   }
-  // 工具节点在 TOOL_CALL_END 之后处于「执行中」状态（官方 COT 事件文档对 22 的定义），
-  // 只有 TOOL_CALL_RESULT 才让它落定。所以「关掉工具输出」不能简单地不发 RESULT——
-  // 那会让每个工具节点永远转圈；结果串本身为空时同理。两种情况都改发一条极简 text
-  // 结果收尾：气泡里只留「工具名 · 命令/路径」加一个完成标记，与 Claude Code 自身
-  // 界面一致，又不会留下未落定的节点。
+  // TOOL_CALL_RESULT settles the tool node. Empty results still need a compact
+  // completion marker so the Feishu renderer does not leave the node spinning.
   const omitResult = !cotToolResultEnabled(ds) || entry.result.length === 0;
   const language = omitResult ? undefined : state.resultLanguages?.get(entry.id);
   return [
@@ -612,7 +642,7 @@ export function handleCotThinkingUpdate(
 ): boolean {
   // Thinking bubbles are outbound messages too. Keep silent fires quiet even
   // when /cot show is armed, without suppressing another turn in this session.
-  if (isSilentScheduledTurn(ds, msg.turnId)) return false;
+  if (isSilentScheduledTurn(ds, msg.turnId) || ds.session.hiddenThinkingTurns?.includes(msg.turnId)) return false;
   if (!cotEnabled(ds)) return false;
   const key = turnKeyOf(msg);
   let state = states.get(ds);
@@ -637,6 +667,26 @@ export function handleCotThinkingUpdate(
   }
   state.pendingEntries = msg.entries;
   void pump(ds, state);
+  return true;
+}
+
+/** Retire only the timeline that a confirmed steer replaced. The worker sends
+ * its final cumulative update first, so the pump drains remaining results
+ * before RUN_FINISHED. No new bubble is created and no task is settled here. */
+export function handleCotThinkingSuperseded(
+  ds: DaemonSession,
+  msg: Extract<WorkerToDaemon, { type: 'thinking_superseded' }>,
+): boolean {
+  if (msg.sessionId !== ds.session.sessionId) return false;
+  const key = turnKeyOf(msg);
+  if (ds.lastThinkingUpdate && turnKeyOf(ds.lastThinkingUpdate) === key) {
+    ds.lastThinkingUpdate = undefined;
+  }
+  let state = states.get(ds);
+  if (state?.turnKey !== key) state = recentStates.get(ds)?.get(msg.turnId);
+  if (!state || state.turnKey !== key) return false;
+  // Still close a created bubble if /cot was turned off after its last update.
+  settleSupersededState(ds, state);
   return true;
 }
 

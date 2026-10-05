@@ -1,3 +1,4 @@
+import { CLI_MODEL_CHOICES } from './model-choices.js';
 import { resolveCommand } from './registry.js';
 import { BOTMUX_SHELL_HINTS } from './shared-hints.js';
 import type { CliAdapter, PtyHandle } from './types.js';
@@ -18,6 +19,12 @@ export function createCursorAdapter(pathOverride?: string): CliAdapter {
   let cachedBin: string | undefined;
   return {
     id: 'cursor',
+    // Whole ~/.cursor (chats store.db + projects agent-transcripts + skills):
+    // a directory-level readWrite bind under the sandbox, so the host daemon
+    // reads the same transcript the CLI writes (zero-prompt final harvest) and
+    // store.db keeps working fcntl locks. The worker pre-creates the dir at
+    // spawn (bwrap cannot bind a missing source) — see pre-create block.
+    authPaths: ['~/.cursor'],
     get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
 
     buildArgs({ resume, resumeSessionId, initialPrompt, model, disableCliBypass }) {
@@ -163,7 +170,7 @@ export function createCursorAdapter(pathOverride?: string): CliAdapter {
     skillsDir: '~/.cursor/skills',
     systemHints: BOTMUX_SHELL_HINTS,
     altScreen: true,
-    modelChoices: ['auto', 'claude-4-sonnet', 'claude-4-opus', 'gpt-5'],
+    modelChoices: CLI_MODEL_CHOICES['cursor'],
   };
 }
 

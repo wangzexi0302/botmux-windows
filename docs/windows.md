@@ -24,6 +24,39 @@ Windows 单文件发行包和 Electron 安装包均不在本阶段支持范围�
 原生 tmux 移植版需要另行验证 botmux 的 control-mode / pipe-pane / reattach 行为；
 需要上游现有完整运行环境时使用 WSL2。
 
+## 2026-10-05 上游合并与兼容验证
+
+本轮合入上游 `78289b228d616ce47c1f8dee92640d49971d33d3`（2026-10-04），
+保留 Windows 默认 PTY、npm 启动器解析、Unicode 输入、原生 Zellij 和 Node IPC 启停。
+上游新增的进程身份校验与 Windows 控制队列共同使用；重复 supervisor 不再清空
+现有实例的命令队列，停止超时仍保留 supervisor。
+Windows 进程身份和命令行查询使用 8 秒有界超时，容纳繁忙机器上 PowerShell/CIM
+首次启动超过 2 秒的情况；无法取得身份时仍拒绝启动或停止目标进程。
+命令行查询固定 UTF-8，中文及 emoji checkout 路径可以通过真实进程身份校验。
+Zellij socket 的长路径、8.3 短路径和扩展路径别名按文件身份验证，拒绝其它会话标记。
+Codex 标题同步在预览等待耗尽时继续写入兜底标题，普通读取错误仍直接报错。
+
+严格环境模式在 Windows 上按变量名大小写不敏感匹配 PATH、SystemRoot 和显式授权，
+并过滤不同大小写的宿主凭证与会话身份覆盖。原生 Zellij 同样应用严格注入过滤及
+Codex 实例凭证边界，不调用 POSIX `env`。Pi 的嵌入源与生成文件固定 LF，MiMoCode
+使用平台路径拼接并保留逻辑 `~/` 路径。
+
+本机使用 Bun 1.4.2、Node 24.16.0，通过完整构建、28 个相关测试文件的 890 项测试，
+另有 15 项平台限定用例跳过；原生 Windows 下的 POSIX 文件符号链接场景由 Linux CI 验证。
+这不是上游全部测试套件的验收。真实 Codex / Claude 管道与 PTY 版本启动、Codex
+Unicode 输入框、Zellij 正常/严格环境下的同 PID 重连与关闭均已验证；这些 smoke
+不提交模型请求，不代表新增上游功能的完整飞书链路已经验收。
+
+```powershell
+bun run build
+node --test test/sync-upstream.test.mjs
+node scripts/smoke-windows-cli.mjs
+node scripts/smoke-windows-codex-input.mjs
+node scripts/smoke-windows-zellij.mjs
+node scripts/smoke-windows-zellij.mjs --strict
+node scripts/smoke-windows-zellij-cli.mjs C:\path\codex.cmd C:\path\claude.exe
+```
+
 ## 原生 Zellij 托管会话
 
 本次在 Windows 上验证 **Zellij 0.45.1**。安装官方 Windows ZIP 中的 `zellij.exe`，
@@ -86,6 +119,8 @@ Bun 只负责包管理和构建。实际测试中 Bun 1.4.2 的 ConPTY 路径会
 版本检查、更新状态探测和 Codex 模型列表查询也复用同一 npm 启动器解析，
 避免 Windows 的 `execFile` 直接运行 `.cmd` 时返回 `EINVAL`。smoke 同时检查
 真实 CLI 的管道调用与 PTY 调用；FNM 的 POSIX 符号链接布局测试仅在 Linux 运行。
+真实 PTY 生命周期测试在 Node 的 Windows/Linux 阻塞 CI 中运行；Bun 直接调用
+node-pty 会在输出前提前退出，该运行时下仅跳过此 PTY 用例，仍验证查找和启动器解析。
 
 ConPTY 输入为 BMP Unicode 字符发送显式 Win32 Unicode 按键，保留中文弯引号、
 破折号与箭头；连续字符发送按下/抬起事件，emoji 保留完整代理对。避免 native
@@ -125,7 +160,10 @@ GitHub Actions 手动运行。GitHub 的定时执行可能延迟，公开仓库 
 工作流再合并。兼容测试是本阶段的针对性检查，并不等同于上游全部测试或飞书实测。
 
 本 Fork 默认分支必须是 `codex/windows`，使定时工作流生效。Actions 需要允许
-工作流创建 PR；使用仓库自带 `GITHUB_TOKEN`，不需要存储个人访问令牌。
+工作流创建 PR；当前使用仓库自带 `GITHUB_TOKEN`。它没有 workflow 写权限：
+当上游提交修改 `.github/workflows/` 时，GitHub 会拒绝推送，原子推送不会更新任何分支。
+2026-10-05 的同步失败即由此造成，本轮已通过维护者 Git 凭证手动快进镜像。
+后续遇到同类修改仍需手动同步；无人值守处理需要另行配置具有 workflow 写权限的凭证。
 只有 `sync` 作业拥有内容/PR 写权限，运行项目代码的验证作业只有读取权限。
 Fork 中已停用继承来的上游发布、npm dist-tag、文档发布和发布审批清理工作流；
 这些文件仍保留，避免同步时产生不必要差异。

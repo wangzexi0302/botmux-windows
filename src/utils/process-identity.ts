@@ -4,6 +4,10 @@ import { existsSync, readFileSync } from 'node:fs';
 const LINUX_BOOT_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Cold PowerShell/CIM startup on a busy Windows runner can exceed two seconds.
+// Keep queries bounded while allowing the same ownership evidence to arrive.
+export const WINDOWS_PROCESS_QUERY_TIMEOUT_MS = 8_000;
+
 /** Identity suitable for durable process ownership, including across reboots. */
 export function readDurableProcessIdentity(pid: number): string | undefined {
   const started = readProcessStartIdentity(pid);
@@ -55,6 +59,25 @@ export function readProcessStartIdentity(pid: number): string | undefined {
       // Disappeared or unreadable: never fall through to ambient ps.
     }
     return undefined;
+  }
+  if (process.platform === 'win32') {
+    try {
+      const started = execFileSync('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `$p = Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\"; `
+          + 'if ($p) { $p.CreationDate.ToUniversalTime().Ticks }',
+      ], {
+        encoding: 'utf-8',
+        timeout: WINDOWS_PROCESS_QUERY_TIMEOUT_MS,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+      return started || undefined;
+    } catch {
+      return undefined;
+    }
   }
   const ps = systemPsBin();
   if (!ps) return undefined;

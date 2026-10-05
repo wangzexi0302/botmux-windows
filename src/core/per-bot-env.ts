@@ -91,6 +91,7 @@ const RESERVED_ENV_KEYS = new Set<string>([
 
 /** Whether `key` is botmux-controlled and therefore rejected from per-bot env. */
 export function isReservedPerBotEnvKey(key: string): boolean {
+  if (process.platform === 'win32') key = key.toUpperCase();
   if (RESERVED_ENV_KEYS.has(key)) return true;
   return RESERVED_ENV_PREFIXES.some((p) => key.startsWith(p));
 }

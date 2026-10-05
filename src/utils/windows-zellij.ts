@@ -9,6 +9,7 @@ import { encodeWindowsPtyInput } from './windows-pty-input.js';
 import { resolveBotmuxWrapperBinDir } from '../core/botmux-wrapper.js';
 import type { SpawnOpts } from '../adapters/backend/types.js';
 import { zellijEnv } from '../setup/ensure-zellij.js';
+import { botInjectedEnv } from '../core/env-policy.js';
 
 // A pane-local launcher, not a server-global env override. Inline source also
 // works in compiled builds, without referencing a virtual dist/ file. The
@@ -27,10 +28,18 @@ child.on('exit',code=>process.exit(code??1));
 export function buildWindowsZellijPane(bin: string, args: string[], opts: SpawnOpts, bootstrapFile: string): { bin: string; args: string[]; bootstrap: string } {
   const env: NodeJS.ProcessEnv = {};
   // Windows env keys are case-insensitive; avoid PATH/Path and owner aliases.
-  for (const source of [opts.env, opts.injectEnv ?? {}]) {
+  const injected = opts.strictEnv ? botInjectedEnv(opts.injectEnv, { mode: 'strict' }) : opts.injectEnv ?? {};
+  for (const source of [opts.env, injected]) {
     for (const [key, value] of Object.entries(source)) env[key.toUpperCase()] = value;
   }
   applySessionOwnerEnv(env, opts.env.BOTMUX_OWNER_OPEN_ID);
+  if (opts.strictEnv) {
+    env.TERM ??= 'xterm-256color';
+    if (env.BOTMUX_CODEX_INSTANCE_BINDING) {
+      for (const key of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_BASE_URL']) delete env[key];
+    }
+    if (Object.values(env).some(value => value?.includes('\0'))) throw new Error('Strict environment contains an invalid value');
+  }
   const launch = resolveExecutableLaunch(bin, args, env);
   const node = locateExecutable('node', env) ?? (process.versions.bun ? undefined : process.execPath);
   if (!node) throw new Error('Native Windows Zellij requires Node.js on PATH.');
@@ -60,6 +69,18 @@ export function writeWindowsZellijInput(session: string, data: string, paneId?: 
 }
 
 interface WindowsProcess { pid: number; parent: number; name: string; command: string; created: number }
+
+function refersToSameMarker(left: string, right: string): boolean {
+  if (win32.normalize(left).toLowerCase() === win32.normalize(right).toLowerCase()) return true;
+  try {
+    // realpath.native can still retain RUNNER~1 on some Windows runtimes.
+    // A file identity also covers long/short and extended-length aliases,
+    // without accepting a different session marker with matching contents.
+    const a = statSync(left, { bigint: true });
+    const b = statSync(right, { bigint: true });
+    return a.ino !== 0n && a.ino === b.ino && a.dev === b.dev;
+  } catch { return false; }
+}
 
 /** Only return the requested process and its descendants, never an unrelated
  * command line. The PID is validated numerically before entering PowerShell. */
@@ -98,7 +119,7 @@ export function findWindowsZellijProcess(session: string, cli: boolean): number 
       const server = tree.find(p => p.pid === pid);
       if (!server || server.name?.toLowerCase() !== 'zellij.exe' || server.created > modified) continue;
       const arg = server.command?.match(/(?:^|\s)--server\s+(?:"([^"]+)"|(\S+))/);
-      if (!arg || win32.normalize(arg[1] ?? arg[2]!).toLowerCase() !== win32.normalize(marker).toLowerCase()) continue;
+      if (!arg || !refersToSameMarker(arg[1] ?? arg[2]!, marker)) continue;
       if (!cli) { matches.push(pid); continue; }
       const runners = tree.filter(p => p.parent === pid && p.name?.toLowerCase() === 'node.exe'
         && p.command?.includes('/* botmux-zellij-pane */'));

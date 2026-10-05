@@ -41,6 +41,15 @@ try {
   console.error(error.message);
   result = 1;
 } finally {
+  // Let Codex close its console before tearing down ConPTY. Force-killing a
+  // live console races node-pty's asynchronous console-list helper.
+  if (!exited) {
+    backend.write('\x03');
+    await pause(150);
+    if (!exited) backend.write('\x03');
+    const gracefulDeadline = Date.now() + 2_000;
+    while (!exited && Date.now() < gracefulDeadline) await pause(50);
+  }
   backend.kill();
   const deadline = Date.now() + 5_000;
   while (!exited && Date.now() < deadline) await pause(50);

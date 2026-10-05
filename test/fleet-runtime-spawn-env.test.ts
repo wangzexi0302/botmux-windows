@@ -37,6 +37,7 @@ describe('startFleetViaSupervisor restart environment', () => {
       '',
     ].join('\n'));
     vi.stubEnv('HOME', home);
+    if (process.platform === 'win32') vi.stubEnv('USERPROFILE', home);
     vi.stubEnv('BOTMUX_SESSION_ID', 'session-1');
     vi.stubEnv('WEB_HOST', '127.0.0.1');
     vi.stubEnv('WEB_EXTERNAL_PORT', '9000');

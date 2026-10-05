@@ -12,7 +12,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const request = vi.fn();
 vi.mock('../src/bot-registry.js', () => ({
-  getBot: vi.fn(() => ({ config: { thinkingCard: true } })),
+  getBot: vi.fn(() => ({ config: { cotEnabled: true } })),
   getBotClient: vi.fn(() => ({ request })),
 }));
 
@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { handleCotThinkingUpdate, finalizeCotMessage, abortCotMessage, sweepOrphanCotMessages, settleCotMessageForShutdown } from '../src/im/lark/cot-message.js';
 import { getBot } from '../src/bot-registry.js';
 import { armSilentScheduledTurn } from '../src/core/silent-schedule-turns.js';
+import { t, localeForBot } from '../src/i18n/index.js';
 
 // Orphan markers land under config.session.dataDir — point it at a tmp dir so
 // tests never touch the packaged data directory.
@@ -43,6 +44,9 @@ const makeDs = (over: any = {}): any => ({
 });
 
 const think = (text: string): any => ({ kind: 'thinking', text });
+const say = (text: string): any => ({ kind: 'text', text });
+/** Same source as the renderer, so the assertion is locale-independent. */
+const placeholder = (): string => t('cot.thinking_placeholder', undefined, localeForBot('app1'));
 const upd = (entries: any[], turnId = 'om_turn1'): any => ({ type: 'thinking_update', entries, turnId });
 
 /** All PUT event batches flattened to [event_type, parsed content] pairs. */
@@ -59,11 +63,24 @@ beforeEach(() => {
     }
     return { code: 0, data: {} };
   });
-  vi.mocked(getBot).mockClear().mockReturnValue({ config: { thinkingCard: true } } as any);
+  vi.mocked(getBot).mockClear().mockReturnValue({ config: { cotEnabled: true } } as any);
   rmSync(orphanDir, { recursive: true, force: true });
 });
 
 describe('handleCotThinkingUpdate', () => {
+  it.each([false, true])('keeps hidden recovery turns quiet after restore with cotForced=%s', async cotForced => {
+    const ds = makeDs({ cotForced, session: JSON.parse(JSON.stringify({ hiddenThinkingTurns: ['trg_recovery'] })) });
+    handleCotThinkingUpdate(ds, upd([say('User work')], 'om_user'));
+    await flush(); request.mockClear();
+    expect(handleCotThinkingUpdate(ds, upd([say('Internal recovery')], 'trg_recovery'))).toBe(false);
+    expect(finalizeCotMessage(ds, 'trg_recovery', 'completed')).toBe(false);
+    expect(handleCotThinkingUpdate(ds, upd([say('Late update')], 'trg_recovery'))).toBe(false);
+    await flush(); expect(request).not.toHaveBeenCalled();
+    expect(finalizeCotMessage(ds, 'om_user', 'completed')).toBe(true);
+    await flush(); expect(pushedEvents().some(e => e.type === 'RUN_FINISHED')).toBe(true);
+    expect(handleCotThinkingUpdate(ds, upd([say('Next user reply')], 'om_next'))).toBe(true);
+  });
+
   it.each([false, true])('keeps silent scheduled thinking quiet with cotForced=%s', async (cotForced) => {
     const ds = makeDs({ cotForced });
     armSilentScheduledTurn(ds, 'schedule:quiet');
@@ -244,6 +261,75 @@ describe('handleCotThinkingUpdate', () => {
     expect(start2.content.icon).toBe('search');
     expect(events.filter(e => e.type === 'TOOL_CALL_ARGS').length).toBe(1);
     expect(events.filter(e => e.type === 'TOOL_CALL_END').map(e => e.content.toolCallId)).toEqual(['toolu_1', 'toolu_2']);
+  });
+
+  it('renders interim assistant narration (text entries) as reasoning nodes, in transcript order', async () => {
+    const ds = makeDs();
+    // Extended thinking OFF is Claude Code's default: the turn carries text
+    // blocks and tool calls, no thinking at all. Both kinds must reach the
+    // bubble, interleaved exactly as the transcript ordered them.
+    handleCotThinkingUpdate(ds, upd([
+      say('先看一眼配置'),
+      { kind: 'tool_call', id: 'x1', name: 'Read', args: '{"file_path":"/a/b.json"}' },
+      { kind: 'tool_result', id: 'x1', result: '{}' },
+      say('确认了，改这里'),
+    ]));
+    await flush();
+    const deltas = pushedEvents().filter(e => e.type === 'REASONING_MESSAGE_CONTENT').map(e => e.content.delta);
+    expect(deltas).toEqual(['先看一眼配置', '确认了，改这里']);
+    // The narration node is a real reasoning node — the tool hangs under it,
+    // so no placeholder is needed.
+    const start = pushedEvents().find(e => e.type === 'TOOL_CALL_START')!;
+    expect(start.content.parentMessageId).toBeDefined();
+    expect(deltas).not.toContain(placeholder());
+  });
+
+  it('opens with a placeholder reasoning node when the turn starts straight into tooling', async () => {
+    const ds = makeDs();
+    handleCotThinkingUpdate(ds, upd([
+      { kind: 'tool_call', id: 'p1', name: 'Bash', args: '{"command":"ls"}' },
+      { kind: 'tool_result', id: 'p1', result: 'a' },
+      { kind: 'tool_call', id: 'p2', name: 'Bash', args: '{"command":"pwd"}' },
+    ]));
+    await flush();
+    const events = pushedEvents();
+    // Placeholder is emitted BEFORE the first tool node, once only...
+    const deltas = events.filter(e => e.type === 'REASONING_MESSAGE_CONTENT').map(e => e.content.delta);
+    expect(deltas).toEqual([placeholder()]);
+    expect(events.findIndex(e => e.type === 'REASONING_MESSAGE_START'))
+      .toBeLessThan(events.findIndex(e => e.type === 'TOOL_CALL_START'));
+    // ...and every tool node hangs under it, including the second one.
+    const parents = events.filter(e => e.type === 'TOOL_CALL_START').map(e => e.content.parentMessageId);
+    expect(parents).toHaveLength(2);
+    expect(new Set(parents).size).toBe(1);
+    expect(parents[0]).toBeDefined();
+  });
+
+  it('never inserts the placeholder when real thinking leads the turn', async () => {
+    const ds = makeDs();
+    handleCotThinkingUpdate(ds, upd([
+      think('先想清楚'),
+      { kind: 'tool_call', id: 'q1', name: 'Bash', args: '{"command":"ls"}' },
+    ]));
+    await flush();
+    const deltas = pushedEvents().filter(e => e.type === 'REASONING_MESSAGE_CONTENT').map(e => e.content.delta);
+    expect(deltas).toEqual(['先想清楚']);
+  });
+
+  it('inserts the placeholder only once across incremental updates of the same turn', async () => {
+    const ds = makeDs();
+    handleCotThinkingUpdate(ds, upd([{ kind: 'tool_call', id: 'i1', name: 'Bash', args: '' }]));
+    await flush();
+    // Cumulative list grows; the already-sent entries are not re-pushed, and
+    // the placeholder must not reappear ahead of the newly arrived tool.
+    handleCotThinkingUpdate(ds, upd([
+      { kind: 'tool_call', id: 'i1', name: 'Bash', args: '' },
+      { kind: 'tool_result', id: 'i1', result: 'ok' },
+      { kind: 'tool_call', id: 'i2', name: 'Bash', args: '' },
+    ]));
+    await flush();
+    const deltas = pushedEvents().filter(e => e.type === 'REASONING_MESSAGE_CONTENT').map(e => e.content.delta);
+    expect(deltas).toEqual([placeholder()]);
   });
 
   /**
@@ -496,25 +582,17 @@ describe('handleCotThinkingUpdate', () => {
     expect(body.language).toBe('typescript');
   });
 
-  it('thinkingCardToolResult=false swaps the result body for a minimal marker (never drops it)', async () => {
+  it('legacy tool-output opt-out still settles the tool without publishing its result', async () => {
+    vi.mocked(getBot).mockReturnValue({ config: { cotEnabled: true, thinkingCardToolResult: false } } as any);
     const ds = makeDs();
-    vi.mocked(getBot).mockReturnValue({ config: { thinkingCard: true, thinkingCardToolResult: false } } as any);
     handleCotThinkingUpdate(ds, upd([
-      think('check'),
-      { kind: 'tool_call', id: 'R1', name: 'Bash', args: '{"command":"ls"}' },
-      { kind: 'tool_result', id: 'R1', result: 'file-a' },
+      { kind: 'tool_call', id: 'hidden-result', name: 'Bash', args: '{"command":"echo example"}' },
+      { kind: 'tool_result', id: 'hidden-result', result: 'private-result-body' },
     ]));
     await flush();
-    const types = pushedEvents().map(e => e.type);
-    expect(types).toContain('TOOL_CALL_START');
-    expect(types).toContain('TOOL_CALL_ARGS');
-    expect(types).toContain('TOOL_CALL_END');
-    // RESULT 必须仍在：TOOL_CALL_END 之后节点处于「执行中」，只有 RESULT 让它落定。
     const result = pushedEvents().find(e => e.type === 'TOOL_CALL_RESULT')!;
-    expect(result.content.toolCallId).toBe('R1');
     expect(JSON.parse(result.content.content)).toEqual({ type: 'text', text: '✓ 已完成' });
-    // 但真实输出不再出现在气泡里。
-    expect(JSON.stringify(pushedEvents())).not.toContain('file-a');
+    expect(JSON.stringify(pushedEvents())).not.toContain('private-result-body');
   });
 
   it('an empty tool result is also closed with the marker rather than left pending', async () => {
@@ -527,32 +605,6 @@ describe('handleCotThinkingUpdate', () => {
     const result = pushedEvents().find(e => e.type === 'TOOL_CALL_RESULT')!;
     expect(result.content.toolCallId).toBe('E1');
     expect(JSON.parse(result.content.content)).toEqual({ type: 'text', text: '✓ 已完成' });
-  });
-
-  it('absent thinkingCardToolResult means ON; turning it off mid-turn affects the next batch', async () => {
-    const ds = makeDs();
-    vi.mocked(getBot).mockReturnValue({ config: {} } as any);
-    const first = [
-      { kind: 'tool_call', id: 'R1', name: 'Bash', args: '{"command":"ls"}' },
-      { kind: 'tool_result', id: 'R1', result: 'file-a' },
-    ];
-    handleCotThinkingUpdate(ds, upd(first));
-    await flush();
-    const results = () => pushedEvents().filter(e => e.type === 'TOOL_CALL_RESULT')
-      .map(e => [e.content.toolCallId, JSON.parse(e.content.content).type]);
-    expect(results()).toEqual([['R1', 'code']]);
-    // 配置改为关闭：累积列表追加的第二批仍带 RESULT（否则节点停在「执行中」），
-    // 但内容退化成完成标记而不是输出代码块。
-    vi.mocked(getBot).mockReturnValue({ config: { thinkingCardToolResult: false } } as any);
-    handleCotThinkingUpdate(ds, upd([
-      ...first,
-      { kind: 'tool_call', id: 'R2', name: 'Bash', args: '{"command":"pwd"}' },
-      { kind: 'tool_result', id: 'R2', result: '/root' },
-    ]));
-    await flush();
-    expect(results()).toEqual([['R1', 'code'], ['R2', 'text']]);
-    expect(JSON.stringify(pushedEvents())).not.toContain('/root');
-    expect(pushedEvents().filter(e => e.type === 'TOOL_CALL_START').map(e => e.content.toolCallId)).toEqual(['R1', 'R2']);
   });
 
   it('coalesces bursts to the latest entry list (single in-flight pump)', async () => {
@@ -591,9 +643,9 @@ describe('handleCotThinkingUpdate', () => {
 
   it('does nothing when explicitly disabled or apiOnly; absent config means ON (default)', () => {
     const ds = makeDs();
-    vi.mocked(getBot).mockReturnValue({ config: { thinkingCard: false } } as any);
+    vi.mocked(getBot).mockReturnValue({ config: { cotEnabled: false } } as any);
     expect(handleCotThinkingUpdate(ds, upd([think('x')]))).toBe(false);
-    vi.mocked(getBot).mockReturnValue({ config: { thinkingCard: true, apiOnly: true } } as any);
+    vi.mocked(getBot).mockReturnValue({ config: { cotEnabled: true, apiOnly: true } } as any);
     expect(handleCotThinkingUpdate(ds, upd([think('x')]))).toBe(false);
     expect(request).not.toHaveBeenCalled();
     // Default ON: a bot that never touched the field streams CoT.
@@ -604,7 +656,7 @@ describe('handleCotThinkingUpdate', () => {
   it('cotForced (/cot show) overrides both switches for the session, but never apiOnly', () => {
     const ds = makeDs();
     ds.cotForced = true;
-    vi.mocked(getBot).mockReturnValue({ config: { thinkingCard: false, noCotChats: ['oc_chat1'] } } as any);
+    vi.mocked(getBot).mockReturnValue({ config: { cotEnabled: false, noCotChats: ['oc_chat1'] } } as any);
     expect(handleCotThinkingUpdate(ds, upd([think('x')]))).toBe(true);
     vi.mocked(getBot).mockReturnValue({ config: { apiOnly: true } } as any);
     expect(handleCotThinkingUpdate(ds, upd([think('x')]))).toBe(false);
@@ -612,7 +664,7 @@ describe('handleCotThinkingUpdate', () => {
 
   it('does nothing when the chat is muted via noCotChats (/cot off)', () => {
     const ds = makeDs();
-    vi.mocked(getBot).mockReturnValue({ config: { thinkingCard: true, noCotChats: ['oc_chat1'] } } as any);
+    vi.mocked(getBot).mockReturnValue({ config: { cotEnabled: true, noCotChats: ['oc_chat1'] } } as any);
     expect(handleCotThinkingUpdate(ds, upd([think('x')]))).toBe(false);
     expect(request).not.toHaveBeenCalled();
     // A different chat with the same bot config stays enabled.

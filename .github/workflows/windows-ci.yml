@@ -45,11 +45,13 @@ jobs:
         if: runner.os == 'Windows'
         run: bun run windows:cli --help
       - name: Verify executable discovery and real PTY lifecycle
-        run: bun run test -- test/windows-launch.test.ts test/windows-shell-hints.test.ts test/executable.test.ts test/pty-backend-launch-shell.test.ts test/windows-stdin-encoding.test.ts test/backend-gate.test.ts test/cli-runtime-update.test.ts test/codex-coco-detect-models.test.ts
+        run: bun run test -- test/windows-launch.test.ts test/windows-shell-hints.test.ts test/executable.test.ts test/pty-backend-launch-shell.test.ts test/windows-stdin-encoding.test.ts test/backend-gate.test.ts test/cli-runtime-update.test.ts test/codex-coco-detect-models.test.ts test/cli-adapters.test.ts test/pi-initial-prompt.test.ts
+      - name: Verify strict environment and reply delivery boundaries
+        run: bun run test -- test/env-policy.test.ts test/per-bot-env.test.ts test/reply-delivery.test.ts
       - name: Verify upstream sync against disposable Git repositories
         run: node --test test/sync-upstream.test.mjs
       - name: Verify supervisor lifecycle and native Windows control
-        run: bun run test -- test/windows-supervisor-control.test.ts test/fleet-supervisor.integration.test.ts test/index-supervisor-env-boundary.test.ts test/fleet-command-queue.test.ts
+        run: bun run test -- test/windows-supervisor-control.test.ts test/fleet-supervisor.integration.test.ts test/index-supervisor-env-boundary.test.ts test/fleet-command-queue.test.ts test/fleet-runtime.test.ts test/fleet-runtime-spawn-env.test.ts test/fleet-process-identity.test.ts
       - name: Verify Codex title helper process lifecycle
         run: bun run test -- test/codex-app-threads.test.ts
       - name: Verify Zellij platform boundaries and existing session behavior
@@ -68,3 +70,6 @@ jobs:
       - name: Verify real native Zellij persistence and Unicode
         if: runner.os == 'Windows'
         run: node scripts/smoke-windows-zellij.mjs
+      - name: Verify strict native Zellij environment and persistence
+        if: runner.os == 'Windows'
+        run: node scripts/smoke-windows-zellij.mjs --strict

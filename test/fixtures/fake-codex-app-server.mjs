@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { spawn } from 'node:child_process';
 import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -20,6 +21,7 @@ const logPath = process.env.FAKE_CODEX_LOG;
 const pidPath = process.env.FAKE_CODEX_PID_PATH;
 const behavior = process.env.FAKE_CODEX_BEHAVIOR ?? 'success';
 const previewDelayReads = Number(process.env.FAKE_CODEX_PREVIEW_DELAY_READS ?? '0');
+const previewReadDelayMs = Number(process.env.FAKE_CODEX_PREVIEW_READ_DELAY_MS ?? '0');
 const threadNotLoadedReads = Number(process.env.FAKE_CODEX_THREAD_NOT_LOADED_READS ?? '0');
 const updatedDelayReads = Number(process.env.FAKE_CODEX_UPDATED_DELAY_READS ?? '0');
 const updatedBefore = Number(process.env.FAKE_CODEX_UPDATED_BEFORE ?? '100');
@@ -27,6 +29,22 @@ const updatedAfter = Number(process.env.FAKE_CODEX_UPDATED_AFTER ?? '101');
 const finalText = process.env.FAKE_CODEX_FINAL_TEXT;
 const envLogPath = process.env.FAKE_CODEX_ENV_LOG;
 if (pidPath) writeFileSync(pidPath, String(process.pid));
+if (process.env.FAKE_CODEX_INHERITED_STDIO) {
+  // 后代持有 stdio，让父进程 exit 后仍无法触发 close。
+  spawn(process.execPath, ['-e', `
+    const { appendFileSync } = require('node:fs');
+    const log = entry => appendFileSync(process.argv[1], JSON.stringify(entry) + '\\n');
+    process.on('SIGUSR1', () => {
+      process.stdout.write(JSON.stringify({ id: 9001, method: 'stale/request' }) + '\\n',
+        () => log({ staleRequestSent: process.pid }));
+    });
+    log({ stdioHolderPid: process.pid });
+    setTimeout(() => {}, 60_000);
+  `, logPath], { stdio: 'inherit' });
+  if (process.env.FAKE_CODEX_INHERITED_STDIO === 'exit') {
+    process.on('SIGTERM', () => process.exit(0));
+  }
+}
 if (envLogPath) {
   const codexHome = process.env.CODEX_HOME ?? '';
   writeFileSync(envLogPath, JSON.stringify({
@@ -383,6 +401,10 @@ function handle(request) {
       reject(request.id, -32600, `thread ${request.params.threadId} already has an active writer`);
       return;
     }
+    if (behavior === 'resume-different-thread') {
+      respond(request.id, { thread: { id: 'thread-unexpected' } });
+      return;
+    }
     respond(request.id, { thread: { id: request.params.threadId } });
     return;
   }
@@ -396,14 +418,17 @@ function handle(request) {
       reject(request.id, -32600, `thread not loaded: ${request.params.threadId}`);
       return;
     }
-    respond(request.id, {
+    const result = {
       thread: {
         id: request.params.threadId,
         name: currentThreadName ?? null,
         preview: threadReadAttempt > previewDelayReads ? '<botmux_routing> 首条消息预览' : '',
         updatedAt: threadReadAttempt > updatedDelayReads ? updatedAfter : updatedBefore,
       },
-    });
+    };
+    if (!currentThreadName && previewReadDelayMs > 0) {
+      setTimeout(() => respond(request.id, result), previewReadDelayMs);
+    } else respond(request.id, result);
     return;
   }
   if (request.method === 'thread/name/set') {

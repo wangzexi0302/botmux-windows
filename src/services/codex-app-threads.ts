@@ -24,6 +24,12 @@ class CodexAppServerRequestError extends Error {
   }
 }
 
+class CodexAppServerTimeoutError extends Error {
+  constructor(readonly label: string, timeoutMs: number) {
+    super(`Codex app-server ${label} timed out after ${timeoutMs}ms`);
+  }
+}
+
 interface PendingTitleTurn {
   threadId: string;
   turnId?: string;
@@ -311,6 +317,10 @@ class CodexAppServerProbe {
       try {
         ({ preview } = await this.readThreadMetadata(threadId, Math.min(remaining, 2000)));
       } catch (err) {
+        // The preview is optional. A read using the last slice of its budget
+        // may time out before the next loop can observe the deadline.
+        if (err instanceof CodexAppServerTimeoutError && err.label === 'thread/read'
+          && remaining <= 2000) return undefined;
         if (!isThreadNotLoadedError(err, threadId)) throw err;
         if (Date.now() >= deadline) return undefined;
       }
@@ -389,7 +399,7 @@ class CodexAppServerProbe {
       return await Promise.race([
         promise,
         new Promise<T>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`Codex app-server ${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+          timer = setTimeout(() => reject(new CodexAppServerTimeoutError(label, timeoutMs)), timeoutMs);
         }),
       ]);
     } finally {
@@ -727,7 +737,7 @@ export async function setCodexAppThreadName(opts: SetCodexAppThreadNameOptions):
     opts.registerForceClose,
   );
   try {
-    await client.initialize(timeoutMs);
+    await client.initialize(opts.initializeTimeoutMs ?? timeoutMs);
     if (opts.waitForExistingPreview) {
       await client.waitForThreadPreview(opts.threadId, timeoutMs);
     }

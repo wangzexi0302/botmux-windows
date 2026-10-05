@@ -1,3 +1,6 @@
+import { armTriggerStreamingCard } from './trigger-streaming-card.js';
+import { zeroPromptInjectionForBot, sessionPromptInjection } from './prompt-injection.js';
+import { withLarkTurnIdempotency } from './lark-turn-idempotency.js';
 import * as sessionStore from '../services/session-store.js';
 import * as asyncTriggerStore from '../services/async-trigger-store.js';
 import * as idempotencyStore from '../services/idempotency-store.js';
@@ -47,6 +50,8 @@ export interface TriggerSessionDeps {
  * identity that participates in durable delivery reconciliation. */
 export interface TriggerSessionInternalOptions {
   stableTurnId?: string;
+  /** A loud idempotent relay must not be replayed by worker crash recovery. */
+  atMostOnce?: boolean;
   /** Synchronous write-ahead hook invoked immediately before worker IPC/fork.
    *  Durable receivers use it to persist DISPATCHED with the exact worker
    *  generation. Throwing aborts the dispatch. */
@@ -284,7 +289,7 @@ export function resolveIdempotencyHit(
   // legitimate own record, and an unstamped legacy record is correctly not
   // trusted (a new idempotency turn has no unstamped evidence of its own).
   const asyncRec = asyncTriggerStore.lookup(hit.sessionId, hit.triggerId);
-  let ownedOutcome: 'pending' | 'completed' | 'failed' | undefined;
+  let ownedOutcome: 'pending' | 'completed' | 'failed' | 'interrupted' | undefined;
   if (asyncRec) {
     if (asyncRec.ownerLarkAppId === hit.ownerLarkAppId) {
       ownedOutcome = asyncRec.result.status;
@@ -298,6 +303,9 @@ export function resolveIdempotencyHit(
   }
   if (ownedOutcome === 'failed') {
     return { kind: 'terminal', chatId, message: 'previous dispatch outcome is unknown (ambiguous crash); not re-run (at-most-once)' };
+  }
+  if (ownedOutcome === 'interrupted') {
+    return { kind: 'terminal', chatId, message: 'previous dispatch was interrupted; not re-run under the same idempotency key' };
   }
   if (hit.state === 'attempting') {
     // Ground truth for "genuinely in flight" is a LIVE WORKER, not registry
@@ -402,7 +410,7 @@ export async function reconcileIdempotencyLeasesOnBoot(
       try {
         const asyncRec = asyncTriggerStore.lookup(record.sessionId, record.triggerId);
         const outcome = (asyncRec && asyncRec.ownerLarkAppId === ownerLarkAppId) ? asyncRec.result.status : undefined;
-        if (outcome === 'completed' || outcome === 'failed') continue; // already durable-terminal
+        if (outcome === 'completed' || outcome === 'failed' || outcome === 'interrupted') continue; // already durable-terminal
         if (record.state === 'attempting') {
           terminalizeAttempting(record); // durable dispatch_unknown; throws on real I/O failure
           continue;
@@ -436,7 +444,10 @@ export async function reconcileIdempotencyLeasesOnBoot(
       if (asyncRec && asyncRec.ownerLarkAppId !== ownerLarkAppId) {
         logger.warn(`[idempotency] reconcile ignoring foreign async evidence for ${record.sessionId}/${record.triggerId}: record owner=${asyncRec.ownerLarkAppId ?? '(unstamped)'} != ${ownerLarkAppId}`);
       }
-      if (outcome === 'completed') continue; // converged good; retry reuses + polls
+      // An explicit interrupt is a successful terminal of THIS exact turn. It
+      // deliberately leaves the fresh session usable, just like completed, so
+      // boot reconcile must not quarantine/close it after a daemon restart.
+      if (outcome === 'completed' || outcome === 'interrupted') continue;
       if (outcome === 'failed') {
         // Already durable-failed, but a PREVIOUS boot may have crashed after
         // writing failed and before closing → always re-quarantine and re-attempt
@@ -752,6 +763,7 @@ function buildExistingSessionContent(
     // HTTP response directives are carried separately at application priority.
     codexAppMessageContext,
     sessionBackendType: ds.session.backendType,
+    promptInjection: sessionPromptInjection(ds),
     turnId,
   });
 }
@@ -763,7 +775,35 @@ async function triggerSessionTurnAdmitted(
 ): Promise<TriggerResponse> {
   const stableTurnId = internal?.stableTurnId?.trim();
   const triggerId = stableTurnId || `trg_${randomUUID()}`;
+  // HTTP opt-in for codex-app native in-flight steer (turn/steer). The flag is
+  // pure AUTHORIZATION forwarded to the worker — the live runner decides whether
+  // it can actually merge into an active turn (canSteer); when it cannot, the
+  // turn degrades to an ordinary serial follow-up. Marking a FRESH root
+  // steerable is what later allows a follow-up to steer INTO its turn (codex
+  // requires both root and head positively authorized).
+  const steerRequested = req.options?.steer === true;
+  const prepareTriggerPresentation = (target: DaemonSession, exactTurn: boolean): void => {
+    armTriggerStreamingCard(target, req, triggerId, getBot(target.larkAppId).config.apiOnly);
+    // Standalone senders read this anchor from disk. Final-output suppression
+    // is independent: wait/async and presentation-only turns need routing too.
+    let changed = exactTurn && inheritTriggerReplyAnchor(target, triggerId);
+    if (req.presentation?.thinking === 'hidden' && !target.session.hiddenThinkingTurns?.includes(triggerId)) {
+      target.session.hiddenThinkingTurns = [...(target.session.hiddenThinkingTurns ?? []), triggerId].slice(-256);
+      changed = true;
+    }
+    if (changed) sessionStore.updateSession(target.session);
+  };
+  /** Payload shape for fork/send sites: content + the frozen steer flag. The
+   *  follow-up content is already a CliTurnPayload on some paths. */
+  const withSteer = (content: string | CliTurnPayload): string | CliTurnPayload =>
+    !steerRequested
+      ? content
+      : typeof content === 'string'
+        ? { content, codexAppSteerable: true }
+        : { ...content, codexAppSteerable: true };
   const prepareStableDispatch = (target: DaemonSession, willFork: boolean): number | undefined => {
+    prepareTriggerPresentation(target, willFork || !!(stableTurnId || loudTurnId
+      || req.options?.waitForFinalOutput || req.options?.asyncReturnSessionId));
     if (!stableTurnId || !internal?.beforeDispatch) return undefined;
     const currentWorkerGeneration = Math.max(
       target.workerGeneration ?? 0,
@@ -791,7 +831,7 @@ async function triggerSessionTurnAdmitted(
       if (oldest !== undefined) target.suppressedFinalOutputTurns.delete(oldest);
     }
   };
-  // Loud external triggers (no stableTurnId / no durable ledger) whose connector
+  // Loud external triggers (including keyed Lark relays) whose connector
   // opted into suppressFinalOutput. Unlike the durable path above this only drops
   // the trailing final_output — the streaming card / start notice still show. The
   // trigger turn id is stamped onto the fork so the worker echoes it back on
@@ -803,21 +843,15 @@ async function triggerSessionTurnAdmitted(
   // arming there would starve the HTTP caller until its timeout. The generic
   // /api/trigger endpoint accepts caller-supplied options without the webhook
   // route's filtering, so the guard belongs here rather than upstream.
-  const suppressLoudFinal = !stableTurnId
+  const suppressLoudFinal = (!stableTurnId || internal?.atMostOnce === true)
     && !req.options?.waitForFinalOutput
     && !req.options?.asyncReturnSessionId
     && req.options?.suppressFinalOutput === true;
-  const loudTurnId = suppressLoudFinal ? triggerId : undefined;
+  const loudTurnId = suppressLoudFinal || req.presentation?.liveCard === 'on-start'
+    || req.presentation?.thinking === 'hidden' ? triggerId : undefined;
   const armLoudFinalSuppression = (target: DaemonSession): void => {
     if (!suppressLoudFinal) return;
     armTriggerFinalSuppression(target, triggerId);
-    // The synthetic turn id must not cost this turn its chat-scope fold-back
-    // anchor — see inheritTriggerReplyAnchor. Persist immediately: the synthetic
-    // anchor AND the prune watermark it may raise must be on disk for the
-    // independent `botmux send` process (which reads the session file) to resolve
-    // routing and the --mention-back ambiguity window correctly.
-    inheritTriggerReplyAnchor(target, triggerId);
-    sessionStore.updateSession(target.session);
   };
   const disarmLoudFinalSuppression = (target: DaemonSession): void => {
     if (suppressLoudFinal) disarmTriggerFinalSuppression(target, triggerId);
@@ -884,7 +918,11 @@ async function triggerSessionTurnAdmitted(
   }
 
   const dryRun = !!req.options?.dryRun;
-  const prompt = buildUntrustedEventPrompt(req, triggerId);
+  const promptForSession = (target?: DaemonSession) => zeroPromptInjectionForBot(larkAppId, undefined,
+    target ? sessionPromptInjection(target) : undefined)
+    ? [req.instruction, req.envelope.rawText ?? JSON.stringify(req.envelope.payload ?? {})].filter(Boolean).join('\n\n')
+    : buildUntrustedEventPrompt(req, triggerId);
+  const prompt = promptForSession();
   const topicMessage = buildExternalEventTopicMessage(req, larkAppId);
   const codexAppText = buildExternalEventVisibleText(req, larkAppId);
   const codexAppApplicationContext = buildExternalEventApplicationContext(req);
@@ -1183,6 +1221,7 @@ async function triggerSessionTurnAdmitted(
   }
 
   const deliverToExisting = async (target: DaemonSession): Promise<TriggerResponse> => {
+    const prompt = promptForSession(target);
     // Ownership guard (PR #597): the target must still be the live, registered
     // occupant before we dispatch. Validate by object identity at its canonical
     // key AND — because a session can legitimately be reached via a non-canonical
@@ -1390,6 +1429,7 @@ async function triggerSessionTurnAdmitted(
             armFinalOutputSuppression(target, dispatchAttempt);
             const accepted = sendWorkerInput(target, content, triggerId, {
               ...(dispatchAttempt !== undefined ? { dispatchAttempt } : {}),
+              ...(steerRequested ? { codexAppSteerable: true as const } : {}),
             });
             if (!accepted) throw new Error('worker refused trigger input before acceptance');
             recordAcceptedInput();
@@ -1435,6 +1475,7 @@ async function triggerSessionTurnAdmitted(
             // after the daemon has already terminalized it (dispatch_unknown). The
             // dormant-fork branch rides atMostOnce on the fork init instead.
             ...(turnLease ? { atMostOnce: true } : {}),
+            ...(steerRequested ? { codexAppSteerable: true as const } : {}),
           });
         } catch (err) {
           // A throw AFTER the barrier (begin/prepare/arm/send). Nothing is proven
@@ -1489,6 +1530,8 @@ async function triggerSessionTurnAdmitted(
       armLoudFinalSuppression(target);
       const accepted = sendWorkerInput(target, content, stableTurnId ? triggerId : loudTurnId, {
         ...(dispatchAttempt !== undefined ? { dispatchAttempt } : {}),
+        ...(internal?.atMostOnce ? { atMostOnce: true } : {}),
+        ...(steerRequested ? { codexAppSteerable: true as const } : {}),
       });
       if (!accepted) {
         disarmLoudFinalSuppression(target);
@@ -1533,7 +1576,7 @@ async function triggerSessionTurnAdmitted(
         () => {
           const dispatchAttempt = prepareStableDispatch(target, true);
           armFinalOutputSuppression(target, dispatchAttempt);
-          forkWorker(target, content, {
+          forkWorker(target, withSteer(content), {
             resume: target.hasHistory,
             turnId: triggerId,
             ...(dispatchAttempt !== undefined ? { dispatchAttempt } : {}),
@@ -1572,7 +1615,7 @@ async function triggerSessionTurnAdmitted(
         beginAsyncTrigger(target, triggerId);
         const dispatchAttempt = prepareStableDispatch(target, true);
         armFinalOutputSuppression(target, dispatchAttempt);
-        forkWorker(target, content, {
+        forkWorker(target, withSteer(content), {
           resume: target.hasHistory,
           turnId: triggerId,
           ...(dispatchAttempt !== undefined ? { dispatchAttempt } : {}),
@@ -1609,9 +1652,10 @@ async function triggerSessionTurnAdmitted(
     const dispatchAttempt = prepareStableDispatch(target, true);
     armFinalOutputSuppression(target, dispatchAttempt);
     armLoudFinalSuppression(target);
-    forkWorker(target, content, {
+    forkWorker(target, withSteer(content), {
       resume: target.hasHistory,
       turnId: triggerId,
+      ...(internal?.atMostOnce ? { atMostOnce: true } : {}),
       ...(dispatchAttempt !== undefined ? { dispatchAttempt } : {}),
     });
     return {
@@ -1804,6 +1848,7 @@ async function triggerSessionTurnAdmitted(
     // suppress a normal turn. The suppression is best-effort for this narrow race,
     // not a hard guarantee — consistent with the 256/TTL best-effort bound.
     if (loudTurnId) newDs.pendingTurnId = loudTurnId;
+    prepareTriggerPresentation(newDs, !!loudTurnId);
     armLoudFinalSuppression(newDs);
     const { runAutoWorktreeCommit } = await import('../im/lark/card-handler.js');
     void runAutoWorktreeCommit({
@@ -1877,6 +1922,10 @@ async function triggerSessionTurnAdmitted(
       error: 'new trigger session lost its first-owner reservation before startup',
     };
   }
+  // HTTP options.steer on a FRESH turn marks the opening root as steerable
+  // (codex canSteer requires the root itself to be positively authorized), so a
+  // later follow-up can natively turn/steer into it. No-op for non-codex CLIs.
+  if (steerRequested) promptInput.codexAppSteerable = true;
   rememberInput(newDs, prompt, promptInput);
 
   const releaseInitialReservation = (): void => {
@@ -2138,6 +2187,7 @@ async function triggerSessionTurnAdmitted(
     releaseInitialReservation();
   }
   else if (loudTurnId) {
+    prepareTriggerPresentation(newDs, true);
     armLoudFinalSuppression(newDs);
     forkWorker(newDs, promptInput, loudTurnId);
     releaseInitialReservation();
@@ -2161,8 +2211,36 @@ export async function triggerSessionTurn(
   deps: TriggerSessionDeps,
   internal?: TriggerSessionInternalOptions,
 ): Promise<TriggerResponse> {
-  return withBotTurnAdmission(
+  const result = await withBotTurnAdmission(
     deps.larkAppId,
-    () => triggerSessionTurnAdmitted(req, deps, internal),
+    () => {
+      if (!req.options?.turnIdempotencyKey || req.options.asyncReturnSessionId) {
+        return triggerSessionTurnAdmitted(req, deps, internal);
+      }
+      if (!req.target.sessionId || req.options.waitForFinalOutput || req.options.dryRun || internal) {
+        return Promise.resolve<TriggerResponse>({ ok: false, errorCode: 'bad_request', error: 'Lark turn idempotency requires an existing session without wait/dryRun/internal dispatch controls' });
+      }
+      const { turnIdempotencyKey: _key, ...options } = req.options;
+      return withLarkTurnIdempotency(req, deps.larkAppId, (triggerId, beforeDispatch) =>
+        triggerSessionTurnAdmitted({ ...req, options }, deps, {
+          stableTurnId: triggerId, atMostOnce: true,
+          beforeDispatch: () => {
+            beforeDispatch();
+            const target = activeBySessionId(deps.activeSessions, req.target.sessionId!);
+            if (target && inheritTriggerReplyAnchor(target, triggerId)) {
+              sessionStore.updateSession(target.session);
+            }
+          },
+        }));
+    },
   );
+  // Echo the steer AUTHORIZATION at the single response chokepoint (the many
+  // buildAsyncQueuedResponse sites stay untouched). Skip an idempotent REUSE:
+  // nothing was dispatched on this call, so the echo must not claim it was.
+  // This never asserts native admission — the runner's canSteer decides that
+  // asynchronously and falls back to a serial queue when no turn is steerable.
+  if (req.options?.steer === true && result.ok && result.idempotent !== true) {
+    result.steer = true;
+  }
+  return result;
 }
