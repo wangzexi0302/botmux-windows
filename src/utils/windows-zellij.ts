@@ -70,6 +70,18 @@ export function writeWindowsZellijInput(session: string, data: string, paneId?: 
 
 interface WindowsProcess { pid: number; parent: number; name: string; command: string; created: number }
 
+function refersToSameMarker(left: string, right: string): boolean {
+  if (win32.normalize(left).toLowerCase() === win32.normalize(right).toLowerCase()) return true;
+  try {
+    // realpath.native can still retain RUNNER~1 on some Windows runtimes.
+    // A file identity also covers long/short and extended-length aliases,
+    // without accepting a different session marker with matching contents.
+    const a = statSync(left, { bigint: true });
+    const b = statSync(right, { bigint: true });
+    return a.ino !== 0n && a.ino === b.ino && a.dev === b.dev;
+  } catch { return false; }
+}
+
 /** Only return the requested process and its descendants, never an unrelated
  * command line. The PID is validated numerically before entering PowerShell. */
 function processTree(pid: number): WindowsProcess[] {
@@ -107,7 +119,7 @@ export function findWindowsZellijProcess(session: string, cli: boolean): number 
       const server = tree.find(p => p.pid === pid);
       if (!server || server.name?.toLowerCase() !== 'zellij.exe' || server.created > modified) continue;
       const arg = server.command?.match(/(?:^|\s)--server\s+(?:"([^"]+)"|(\S+))/);
-      if (!arg || win32.normalize(arg[1] ?? arg[2]!).toLowerCase() !== win32.normalize(marker).toLowerCase()) continue;
+      if (!arg || !refersToSameMarker(arg[1] ?? arg[2]!, marker)) continue;
       if (!cli) { matches.push(pid); continue; }
       const runners = tree.filter(p => p.parent === pid && p.name?.toLowerCase() === 'node.exe'
         && p.command?.includes('/* botmux-zellij-pane */'));
