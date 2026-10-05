@@ -51,7 +51,7 @@ jobs:
       - name: Verify upstream sync against disposable Git repositories
         run: node --test test/sync-upstream.test.mjs
       - name: Verify supervisor lifecycle and native Windows control
-        run: bun run test -- test/windows-supervisor-control.test.ts test/fleet-supervisor.integration.test.ts test/index-supervisor-env-boundary.test.ts test/fleet-command-queue.test.ts test/fleet-runtime.test.ts test/fleet-runtime-spawn-env.test.ts test/fleet-process-identity.test.ts
+        run: bun run test -- test/windows-supervisor-control.test.ts test/fleet-supervisor.integration.test.ts test/index-supervisor-env-boundary.test.ts test/fleet-command-queue.test.ts test/fleet-runtime.test.ts test/fleet-runtime-spawn-env.test.ts test/fleet-process-identity.test.ts --maxWorkers=2
       - name: Verify Codex title helper process lifecycle
         run: bun run test -- test/codex-app-threads.test.ts
       - name: Verify Zellij platform boundaries and existing session behavior

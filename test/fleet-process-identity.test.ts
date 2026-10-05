@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,6 +31,7 @@ describe('fleet process identity', () => {
     const entry = join(root, 'index-supervisor.js');
     writeFileSync(entry, "console.log('ready'); setInterval(() => {}, 1000);\n");
     const child = spawnTsScript(entry, [], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    let processStart: string | undefined;
     try {
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error('supervisor fixture did not become ready')), 5000);
@@ -37,14 +39,22 @@ describe('fleet process identity', () => {
         child.stdout!.once('data', () => { clearTimeout(timer); resolve(); });
       });
       const pid = child.pid!;
-      const processStart = readDurableProcessIdentity(pid);
+      processStart = readDurableProcessIdentity(pid);
       if (!processStart) throw new Error('Missing fixture process identity');
+      // Existing fleet/lock records were written with CIM's microsecond date.
+      // A faster native birth query must still attest those persisted identities.
+      const legacyStart = execFileSync('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; `
+          + 'if ($p) { $p.CreationDate.ToUniversalTime().Ticks }',
+      ], { encoding: 'utf8', timeout: 20_000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      expect(processStart).toBe(legacyStart);
       expect(readFleetProcessCommandLine(pid)).toContain(entry);
       expect(inspectSupervisorState({
         supervisorPid: pid,
         supervisorStartedAt: new Date().toISOString(),
         supervisorEntry: entry,
-        supervisorProcessStart: processStart,
+        supervisorProcessStart: legacyStart,
         procs: [],
       }).status).toBe('exact');
     } finally {
@@ -56,7 +66,9 @@ describe('fleet process identity', () => {
       }
       rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
-  }, 45_000);
+    // The OS may immediately reuse the PID, but never the old birth identity.
+    expect(readDurableProcessIdentity(child.pid!)).not.toBe(processStart);
+  }, 60_000);
 
   it('matches built-in roles across checkout paths without accepting another role', () => {
     expect(builtinFleetEntryMatches('daemon', '/usr/bin/node /old/review/dist/index-daemon.js')).toBe(true);
