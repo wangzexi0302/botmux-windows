@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 
 const H5_PREFIX = 'BOTMUX_DASHBOARD_FEISHU_H5_';
 const FUTURE_H5_KEY = `${H5_PREFIX}FUTURE_ENTRY_TEST`;
@@ -24,8 +24,9 @@ vi.mock('../src/core/fleet-supervisor.js', () => {
     FleetSupervisor: class {
       async stopAll(): Promise<void> {}
       async drainCommands(): Promise<void> {}
-      start(): void {
+      start(): boolean {
         boundary.envAtFleetStart = { ...process.env };
+        return true;
       }
     },
   };
@@ -94,6 +95,10 @@ describe('index-supervisor environment boundary', () => {
       ].join('\n'));
 
       vi.stubEnv('HOME', home);
+      vi.stubEnv('PATH', ['/custom/cli-identity/old.bin', '/usr/bin'].join(delimiter));
+      vi.stubEnv('BOTMUX_IDENTITY_BIN', '/custom/cli-identity/old.bin');
+      vi.stubEnv('ZDOTDIR', '/custom/cli-identity/old.bin/shell');
+      vi.stubEnv('BYTEDCLI_USER_CLOUD_JWT', 'unrelated-turn');
       vi.stubEnv('BOTMUX_DASHBOARD_FEISHU_H5_APP_ID', 'inherited-app-id');
       vi.stubEnv(FUTURE_H5_KEY, 'inherited-future-secret');
       vi.stubEnv(RESTART_MARKER, '1');
@@ -112,6 +117,10 @@ describe('index-supervisor environment boundary', () => {
       expect(observed[RESTART_MARKER]).toBeUndefined();
       expect(observed[RESTART_FALLBACK]).toBeUndefined();
       expect(observed[KEEP_KEY]).toBe('keep');
+      expect(observed.PATH).toBe('/usr/bin');
+      expect(observed.BOTMUX_IDENTITY_BIN).toBeUndefined();
+      expect(observed.ZDOTDIR).toBeUndefined();
+      expect(observed.BYTEDCLI_USER_CLOUD_JWT).toBeUndefined();
     } finally {
       vi.unstubAllEnvs();
       rmSync(home, { recursive: true, force: true });

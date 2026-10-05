@@ -9,6 +9,7 @@ import { ZellijBackend } from '../dist/adapters/backend/zellij-backend.js';
 import { probeZellijFunctional } from '../dist/setup/ensure-zellij.js';
 
 if (process.platform !== 'win32') throw new Error('Run on native Windows with Node.js.');
+const strictEnv = process.argv.includes('--strict');
 assert.deepEqual(probeZellijFunctional().ok, true, 'Zellij functional probe');
 const dir = mkdtempSync(join(tmpdir(), 'bmx-zellij-smoke-'));
 const cwd = join(dir, '原生 Windows');
@@ -21,17 +22,18 @@ const arg = '中文“引号”——→→ 😀😀 café a&b %PATH% "quoted"';
 writeFileSync(fixture, `
 const fs=require('node:fs');
 let data='';
-const save=()=>fs.writeFileSync(${JSON.stringify(report)},JSON.stringify({pid:process.pid,argv:process.argv.slice(2),cwd:process.cwd(),owner:process.env.BOTMUX_OWNER_OPEN_ID,legacy:process.env.__OWNER_OPEN_ID,env:process.env.BMX_TEST_VALUE,cols:process.stdout.columns,rows:process.stdout.rows,data}));
+const save=()=>fs.writeFileSync(${JSON.stringify(report)},JSON.stringify({pid:process.pid,argv:process.argv.slice(2),cwd:process.cwd(),owner:process.env.BOTMUX_OWNER_OPEN_ID,legacy:process.env.__OWNER_OPEN_ID,env:process.env.BMX_TEST_VALUE,unlisted:process.env.BMX_UNLISTED_AUTH,cols:process.stdout.columns,rows:process.stdout.rows,data}));
 process.stdin.setRawMode(true);process.stdin.setEncoding('utf8');
 process.stdin.on('data',s=>{data+=s;save();console.log('INPUT:'+s)});
 process.stdout.on('resize',save);save();console.log('BMX_READY');setInterval(()=>{},1000);
 `);
 writeFileSync(hostFile, `
 import {ZellijBackend} from ${JSON.stringify(new URL('../dist/adapters/backend/zellij-backend.js', import.meta.url).href)};
+import {buildSessionChildEnv} from ${JSON.stringify(new URL('../dist/core/env-policy.js', import.meta.url).href)};
 const be=new ZellijBackend(${JSON.stringify(name)});
 process.on('message',msg=>{
  try {
-  if(msg.type==='start') {be.spawn(process.execPath,[${JSON.stringify(fixture)},${JSON.stringify(arg)}],{cwd:${JSON.stringify(cwd)},cols:120,rows:30,env:{...process.env,BOTMUX_OWNER_OPEN_ID:'test-owner'},injectEnv:{BMX_TEST_VALUE:${JSON.stringify(arg + '\nsecond line')},BOTMUX_OWNER_OPEN_ID:'wrong',__OWNER_OPEN_ID:'wrong'}});be.onData(()=>{});be.onExit(()=>{});}
+  if(msg.type==='start') {be.spawn(process.execPath,[${JSON.stringify(fixture)},${JSON.stringify(arg)}],{cwd:${JSON.stringify(cwd)},cols:120,rows:30,env:{...buildSessionChildEnv(process.env,${strictEnv ? "{mode:'strict'}" : 'undefined'}),BOTMUX_OWNER_OPEN_ID:'test-owner'},strictEnv:${strictEnv},strictEnvReattach:${strictEnv},injectEnv:{BMX_TEST_VALUE:${JSON.stringify(arg + '\nsecond line')},BOTMUX_OWNER_OPEN_ID:'wrong',__OWNER_OPEN_ID:'wrong'}});be.onData(()=>{});be.onExit(()=>{});}
   if(msg.type==='input') be.write(msg.data);
   if(msg.type==='resize') be.resize(msg.cols,msg.rows);
   if(msg.type==='pid') process.send({id:msg.id,pid:be.getChildPid(),reattach:be.isReattach});
@@ -51,7 +53,7 @@ function readReport() { try { return JSON.parse(readFileSync(report, 'utf8')); }
 function alive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
 let host; let seq = 0; const allHosts = [];
 function startHost() {
-  host = spawn(process.execPath, [hostFile], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  host = spawn(process.execPath, [hostFile], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], env: { ...process.env, BMX_UNLISTED_AUTH: 'host-sentinel' } });
   allHosts.push(host);
   host.stderr.on('data', d => process.stderr.write(d));
   return request('start');
@@ -75,6 +77,7 @@ try {
   assert.equal(readReport().env, arg + '\nsecond line');
   assert.equal(readReport().owner, 'test-owner');
   assert.equal(readReport().legacy, 'test-owner');
+  assert.equal(readReport().unlisted, strictEnv ? undefined : 'host-sentinel');
   await until(async () => (await request('pid')).pid === cliPid, 'native CLI PID discovery');
   const first = '\x1b[200~' + arg + '\n' + '中文——'.repeat(250) + '\x1b[201~';
   await request('input', { data: first });

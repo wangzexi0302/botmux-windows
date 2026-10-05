@@ -60,6 +60,24 @@ describe.skipIf(process.platform !== 'win32')('Windows Zellij', () => {
     expect(spec.env.__OWNER_OPEN_ID).toBeUndefined();
   });
 
+  it('applies strict injection redaction and Codex instance authority to a native pane', () => {
+    const { dir, shim } = fixture();
+    const opts = { cwd: dir, cols: 100, rows: 30, strictEnv: true,
+      env: { PATH: process.env.PATH!, BOTMUX_OWNER_OPEN_ID: 'owner', BOTMUX_CODEX_INSTANCE_BINDING: 'binding' },
+      injectEnv: { github_token: 'daemon-secret', botmux_owner_open_id: 'forged', CODEX_HOME: 'wrong',
+        openai_api_key: 'wrong-instance', CODEX_API_KEY: 'wrong-instance', OPENAI_BASE_URL: 'wrong-instance',
+        ANTHROPIC_AUTH_TOKEN: 'explicit-bot-auth' } };
+    const pane = buildWindowsZellijPane(shim, ['中文'], opts, join(dir, 'launch.json'));
+    const env = JSON.parse(pane.bootstrap).env;
+    expect(env.BOTMUX_OWNER_OPEN_ID).toBe('owner');
+    expect(env.__OWNER_OPEN_ID).toBe('owner');
+    expect(env.TERM).toBe('xterm-256color');
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe('explicit-bot-auth');
+    for (const key of ['GITHUB_TOKEN', 'CODEX_HOME', 'OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_BASE_URL']) expect(env[key], key).toBeUndefined();
+    expect(buildLayoutString(shim, ['中文'], opts, join(dir, 'launch.json'))).not.toContain('/usr/bin/env');
+    expect(() => buildWindowsZellijPane(shim, [], { ...opts, injectEnv: { AUTH: 'invalid\0value' } }, join(dir, 'launch.json'))).toThrow('invalid value');
+  });
+
   it('scrubs session/provider authority from the server environment', () => {
     const env = zellijEnv({ Path: 'C:\\bin', BOTMUX_OWNER_OPEN_ID: 'owner', __OWNER_OPEN_ID: 'owner',
       LARK_APP_SECRET: 'secret', ZELLIJ: '0', zellij_session_name: 'outer', ZELLIJ_PANE_ID: '2', HTTPS_PROXY: 'secret-proxy' });

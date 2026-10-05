@@ -458,6 +458,16 @@ export function extractResources(msgType: string, rawContent: string, numberer?:
           }
         }
       }
+      // Rich-text uploads made through some Lark clients are not inline nodes.
+      // They arrive beside the localized post body as a top-level `files` array.
+      // Resolve that body first (above), then append these descriptors; pushIfNew
+      // collapses a file that Lark happens to represent in both places.
+      const topLevelFiles = Array.isArray(parsed.files) ? parsed.files : [];
+      for (const file of topLevelFiles) {
+        if (file?.file_key) {
+          pushIfNew(resources, { type: 'file', key: file.file_key, name: file.file_name ?? file.file_key });
+        }
+      }
       return resources;
     }
 
@@ -537,6 +547,7 @@ export function parseEventMessage(
     senderUnionId: sender.sender_id?.union_id,
     senderType: sender.sender_type,
     msgType: message.message_type,
+    ...(message.message_type === 'post' ? { rawPostContent: message.content } : {}),
     content: extractTextContent(message.message_type, message.content, message.mentions, numberer),
     createTime: message.create_time,
     mentions,
@@ -560,6 +571,7 @@ export function parseApiMessage(msg: any, numberer?: ImgNumberer): LarkMessage {
     senderType: msg.sender?.sender_type ?? 'unknown',
     ...(senderName ? { senderName } : {}),
     msgType,
+    ...(msgType === 'post' ? { rawPostContent: rawContent } : {}),
     content: extractTextContent(msgType, normalizeApiMessageContent(msgType, rawContent), undefined, numberer),
     createTime: msg.create_time ?? '',
   };
@@ -1147,6 +1159,40 @@ const RESOLVED_TEXT_KEY = '__botmux_card_text__';
  * surface an honest placeholder instead of a misleading blank or raw fallback.
  */
 export const CARD_EMBEDDED_PLACEHOLDER = '[卡片内嵌组件，需在飞书客户端展开查看]';
+
+/**
+ * True when the text carries **no information beyond "an attachment was sent"**
+ * — i.e. it is nothing but bare placeholders emitted by the renderers above.
+ *
+ * Only the *bare* forms count as zero-information. A placeholder that carries
+ * real text — `[文件 1: 季度汇报.pdf]`, `[图片 2: 报警前30分钟同比]` (see
+ * {@link withImgAlt}), `[卡片: 发布单 #123]`, `[标签: P0]`, `[输入框: 收件人]`,
+ * or a button's own `[确认发布]` — is deliberately NOT stripped: that text is
+ * the whole point, and for an attachment-only message it is the only thing
+ * worth naming the chat after.
+ *
+ * Used as the AI-title gate for session groups: feeding `[图片 1]` to the
+ * titler yields a confident-but-content-free name ("图片内容分析请求") and,
+ * because a successful rename sets `titled` (see `markSessionGroupTitled`),
+ * permanently closes both the birth and the heal gate. Skipping instead leaves
+ * the group on its placeholder name until the user's next real message — ugly
+ * for a moment, but self-healing rather than wrong forever.
+ *
+ * ⚠️ Coupled to the placeholder literals rendered in this file (`renderPostNode`,
+ * `extractTextContent`, `extractCardContent` and {@link CARD_EMBEDDED_PLACEHOLDER}).
+ * Adding a new zero-information placeholder means adding it here too.
+ */
+export function isPlaceholderOnlyText(text: string): boolean {
+  if (!text.trim()) return false;
+  const stripped = text
+    // `[图片]` / `[图片 2]` / `[文件]` / `[文件 3]` / `[语音]` / `[卡片]`
+    .replace(/\[(?:图片|文件|语音|卡片)(?:\s+\d+)?\]/g, '')
+    .replace(/\[卡片 \(模板\)\]/g, '')
+    .replace(/\[合并转发消息\]/g, '')
+    .replaceAll(CARD_EMBEDDED_PLACEHOLDER, '')
+    .trim();
+  return stripped === '';
+}
 
 /** Wrap merged text so extractCardContent returns it verbatim downstream. */
 export function wrapResolvedCardText(text: string): string {

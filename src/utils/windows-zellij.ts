@@ -9,6 +9,7 @@ import { encodeWindowsPtyInput } from './windows-pty-input.js';
 import { resolveBotmuxWrapperBinDir } from '../core/botmux-wrapper.js';
 import type { SpawnOpts } from '../adapters/backend/types.js';
 import { zellijEnv } from '../setup/ensure-zellij.js';
+import { botInjectedEnv } from '../core/env-policy.js';
 
 // A pane-local launcher, not a server-global env override. Inline source also
 // works in compiled builds, without referencing a virtual dist/ file. The
@@ -27,10 +28,18 @@ child.on('exit',code=>process.exit(code??1));
 export function buildWindowsZellijPane(bin: string, args: string[], opts: SpawnOpts, bootstrapFile: string): { bin: string; args: string[]; bootstrap: string } {
   const env: NodeJS.ProcessEnv = {};
   // Windows env keys are case-insensitive; avoid PATH/Path and owner aliases.
-  for (const source of [opts.env, opts.injectEnv ?? {}]) {
+  const injected = opts.strictEnv ? botInjectedEnv(opts.injectEnv, { mode: 'strict' }) : opts.injectEnv ?? {};
+  for (const source of [opts.env, injected]) {
     for (const [key, value] of Object.entries(source)) env[key.toUpperCase()] = value;
   }
   applySessionOwnerEnv(env, opts.env.BOTMUX_OWNER_OPEN_ID);
+  if (opts.strictEnv) {
+    env.TERM ??= 'xterm-256color';
+    if (env.BOTMUX_CODEX_INSTANCE_BINDING) {
+      for (const key of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_BASE_URL']) delete env[key];
+    }
+    if (Object.values(env).some(value => value?.includes('\0'))) throw new Error('Strict environment contains an invalid value');
+  }
   const launch = resolveExecutableLaunch(bin, args, env);
   const node = locateExecutable('node', env) ?? (process.versions.bun ? undefined : process.execPath);
   if (!node) throw new Error('Native Windows Zellij requires Node.js on PATH.');

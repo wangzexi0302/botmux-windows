@@ -1,0 +1,5 @@
+# Pi embeds these files verbatim; keep committed data identical on Windows.
+src/adapters/cli/pi-initial-prompt-extension.mjs text eol=lf
+src/adapters/cli/pi-turn-boundary-extension.mjs text eol=lf
+src/adapters/cli/pi-initial-prompt-extension-data.ts text eol=lf
+src/adapters/cli/pi-turn-boundary-extension-data.ts text eol=lf

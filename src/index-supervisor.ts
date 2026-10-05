@@ -60,6 +60,7 @@ async function main(): Promise<void> {
   const { readFleetState } = await import('./core/fleet-state-store.js');
   const { consumeWindowsFleetStop } = await import('./core/windows-fleet-control.js');
   const { logger } = await import('./utils/logger.js');
+  const { FLEET_DAEMON_KILL_TIMEOUT_MS } = await import('./core/shutdown-budgets.js');
 
   // Every supervised member: the bot daemons from bots.json PLUS the dashboard.
   // The dashboard is always present (mirrors the old pm2 ecosystem, which always
@@ -76,6 +77,7 @@ async function main(): Promise<void> {
     cwd: configDir,
     daemonNodeArgs: fleetDaemonNodeArgs(),
     logDir: fleetLogDir(),
+    killTimeoutMs: FLEET_DAEMON_KILL_TIMEOUT_MS,
     log: (m) => logger.info(`[supervisor] ${m}`),
   });
 
@@ -116,10 +118,13 @@ async function main(): Promise<void> {
   if (process.platform !== 'win32') process.on('SIGHUP', () => void drain());
 
   logger.info(`[supervisor] starting fleet: ${botCount} bot(s) + dashboard`);
-  // Commands belong to the prior supervisor. A fresh start re-reads bots.json;
-  // discard old intent before publishing this process as the live supervisor.
+  if (!supervisor.start(members)) {
+    // A duplicate must leave the owning supervisor and its command queue intact.
+    process.exit(0);
+  }
+  // The successful owner re-reads bots.json; discard prior-generation commands
+  // before starting Windows polling. A duplicate never consumes this queue.
   if (process.platform === 'win32') drainFleetCommands(fleetCommandPath());
-  supervisor.start(members);
   if (process.platform === 'win32') {
     const identity = readFleetState(fleetStatePath());
     if (!identity || identity.supervisorPid !== process.pid) throw new Error('Missing Windows supervisor identity');
