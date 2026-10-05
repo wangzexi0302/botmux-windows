@@ -74,7 +74,8 @@ export function readFleetProcessCommandLine(pid: number): string | undefined {
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        `$p = Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\"; if ($p) { $p.CommandLine }`,
+        '[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); '
+          + `$p = Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\"; if ($p) { $p.CommandLine }`,
       ], { encoding: 'utf8', timeout: WINDOWS_PROCESS_QUERY_TIMEOUT_MS, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
       return value || undefined;
     } catch { return undefined; }

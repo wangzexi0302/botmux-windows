@@ -32,13 +32,14 @@ Windows 单文件发行包和 Electron 安装包均不在本阶段支持范围�
 现有实例的命令队列，停止超时仍保留 supervisor。
 Windows 进程身份和命令行查询使用 8 秒有界超时，容纳繁忙机器上 PowerShell/CIM
 首次启动超过 2 秒的情况；无法取得身份时仍拒绝启动或停止目标进程。
+命令行查询固定 UTF-8，中文及 emoji checkout 路径可以通过真实进程身份校验。
 
 严格环境模式在 Windows 上按变量名大小写不敏感匹配 PATH、SystemRoot 和显式授权，
 并过滤不同大小写的宿主凭证与会话身份覆盖。原生 Zellij 同样应用严格注入过滤及
 Codex 实例凭证边界，不调用 POSIX `env`。Pi 的嵌入源与生成文件固定 LF，MiMoCode
 使用平台路径拼接并保留逻辑 `~/` 路径。
 
-本机使用 Bun 1.4.2、Node 24.16.0，通过完整构建、28 个相关测试文件的 887 项测试，
+本机使用 Bun 1.4.2、Node 24.16.0，通过完整构建、28 个相关测试文件的 888 项测试，
 另有 15 项平台限定用例跳过；原生 Windows 下的 POSIX 文件符号链接场景由 Linux CI 验证。
 这不是上游全部测试套件的验收。真实 Codex / Claude 管道与 PTY 版本启动、Codex
 Unicode 输入框、Zellij 正常/严格环境下的同 PID 重连与关闭均已验证；这些 smoke

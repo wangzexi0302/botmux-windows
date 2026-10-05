@@ -1,8 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { readDurableProcessIdentity } from '../src/utils/process-identity.js';
+import { spawnTsScript } from './helpers/ts-runner.js';
 import {
   builtinFleetEntryMatches,
   inspectFleetProcess,
   signalAttestedFleetProcess,
+  inspectSupervisorState,
+  readFleetProcessCommandLine,
   type FleetProcessIdentityRuntime,
 } from '../src/core/fleet-process-identity.js';
 
@@ -18,6 +25,39 @@ function runtime(identities: Array<string | undefined>, commands: Array<string |
 afterEach(() => vi.restoreAllMocks());
 
 describe('fleet process identity', () => {
+  it.skipIf(process.platform !== 'win32')('attests a real supervisor entry under a Chinese and emoji path', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'botmux 中文🧪-'));
+    const entry = join(root, 'index-supervisor.js');
+    writeFileSync(entry, "console.log('ready'); setInterval(() => {}, 1000);\n");
+    const child = spawnTsScript(entry, [], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('supervisor fixture did not become ready')), 5000);
+        child.once('error', error => { clearTimeout(timer); reject(error); });
+        child.stdout!.once('data', () => { clearTimeout(timer); resolve(); });
+      });
+      const pid = child.pid!;
+      const processStart = readDurableProcessIdentity(pid);
+      if (!processStart) throw new Error('Missing fixture process identity');
+      expect(readFleetProcessCommandLine(pid)).toContain(entry);
+      expect(inspectSupervisorState({
+        supervisorPid: pid,
+        supervisorStartedAt: new Date().toISOString(),
+        supervisorEntry: entry,
+        supervisorProcessStart: processStart,
+        procs: [],
+      }).status).toBe('exact');
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        await new Promise<void>(resolve => {
+          child.once('close', () => resolve());
+          child.kill();
+        });
+      }
+      rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    }
+  }, 45_000);
+
   it('matches built-in roles across checkout paths without accepting another role', () => {
     expect(builtinFleetEntryMatches('daemon', '/usr/bin/node /old/review/dist/index-daemon.js')).toBe(true);
     expect(builtinFleetEntryMatches('daemon', '/usr/bin/node "/old review/dist/index-daemon.js"')).toBe(true);
