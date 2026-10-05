@@ -2,7 +2,7 @@
 // processes in the SAME cwd. No authentication, model calls or user sessions.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ZellijBackend } from '../dist/adapters/backend/zellij-backend.js';
@@ -10,7 +10,7 @@ import { ZellijObserveBackend } from '../dist/adapters/backend/zellij-observe-ba
 import { discoverAdoptableZellijSessions, validateZellijAdoptTarget } from '../dist/core/zellij-adopt-discovery.js';
 
 if (process.platform !== 'win32' || process.versions.bun) throw new Error('Run with Node on native Windows.');
-const root = mkdtempSync(join(tmpdir(), 'bmx-adopt-smoke-'));
+const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'bmx-adopt-smoke-')));
 const cwd = join(root, '同一工作目录 😀'); mkdirSync(cwd);
 const fixture = join(cwd, 'codex.cjs');
 const launcher = join(cwd, 'codex.cmd');

@@ -11,7 +11,7 @@ import { probeZellijFunctional } from '../dist/setup/ensure-zellij.js';
 if (process.platform !== 'win32') throw new Error('Run on native Windows with Node.js.');
 const strictEnv = process.argv.includes('--strict');
 assert.deepEqual(probeZellijFunctional().ok, true, 'Zellij functional probe');
-const dir = mkdtempSync(join(tmpdir(), 'bmx-zellij-smoke-'));
+const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'bmx-zellij-smoke-')));
 const cwd = join(dir, '原生 Windows');
 mkdirSync(cwd);
 const name = `bmx-winsmoke-${process.pid}-${Date.now()}`;
