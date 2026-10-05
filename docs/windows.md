@@ -118,6 +118,8 @@ Bun 只负责包管理和构建。实际测试中 Bun 1.4.2 的 ConPTY 路径会
 版本检查、更新状态探测和 Codex 模型列表查询也复用同一 npm 启动器解析，
 避免 Windows 的 `execFile` 直接运行 `.cmd` 时返回 `EINVAL`。smoke 同时检查
 真实 CLI 的管道调用与 PTY 调用；FNM 的 POSIX 符号链接布局测试仅在 Linux 运行。
+真实 PTY 生命周期测试在 Node 的 Windows/Linux 阻塞 CI 中运行；Bun 直接调用
+node-pty 会在输出前提前退出，该运行时下仅跳过此 PTY 用例，仍验证查找和启动器解析。
 
 ConPTY 输入为 BMP Unicode 字符发送显式 Win32 Unicode 按键，保留中文弯引号、
 破折号与箭头；连续字符发送按下/抬起事件，emoji 保留完整代理对。避免 native
