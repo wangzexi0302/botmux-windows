@@ -28,7 +28,7 @@ async function until(predicate, message, timeout = 20000) {
   while (Date.now() < end) { if (await predicate()) return; await pause(100); }
   throw new Error(message);
 }
-writeFileSync(fixture, `const fs=require('node:fs');if(process.argv[3])process.env.ZELLIJ_PANE_ID=process.argv[3];let data='';const save=()=>fs.writeFileSync(process.argv[2],JSON.stringify({pid:process.pid,pane:process.env.ZELLIJ_PANE_ID,data}));process.stdin.setRawMode(true);process.stdin.setEncoding('utf8');process.stdin.on('data',s=>{data+=s;save();process.stdout.write('INPUT:'+s)});save();console.log('ADOPT_READY');setInterval(()=>{},1000);`);
+writeFileSync(fixture, `const fs=require('node:fs');if(process.argv[3])process.env.ZELLIJ_PANE_ID=process.argv[3];let data='';const save=()=>{fs.writeFileSync(process.argv[2]+'.tmp',JSON.stringify({pid:process.pid,pane:process.env.ZELLIJ_PANE_ID,data}));fs.renameSync(process.argv[2]+'.tmp',process.argv[2]);};process.stdin.setRawMode(true);process.stdin.setEncoding('utf8');process.stdin.on('data',s=>{data+=s;save();process.stdout.write('INPUT:'+s)});save();console.log('ADOPT_READY');setInterval(()=>{},1000);`);
 try {
   backend.spawn(process.execPath, [fixture, reports[0]], { cwd, cols: 120, rows: 30, env: { ...process.env } });
   backend.onData(() => {}); backend.onExit(() => {});

@@ -22,7 +22,7 @@ const arg = '中文“引号”——→→ 😀😀 café a&b %PATH% "quoted"';
 writeFileSync(fixture, `
 const fs=require('node:fs');
 let data='';
-const save=()=>fs.writeFileSync(${JSON.stringify(report)},JSON.stringify({pid:process.pid,argv:process.argv.slice(2),cwd:process.cwd(),pane:process.env.ZELLIJ_PANE_ID,session:process.env.ZELLIJ_SESSION_NAME,owner:process.env.BOTMUX_OWNER_OPEN_ID,legacy:process.env.__OWNER_OPEN_ID,env:process.env.BMX_TEST_VALUE,unlisted:process.env.BMX_UNLISTED_AUTH,cols:process.stdout.columns,rows:process.stdout.rows,data}));
+const save=()=>{fs.writeFileSync(${JSON.stringify(report + '.tmp')},JSON.stringify({pid:process.pid,argv:process.argv.slice(2),cwd:process.cwd(),pane:process.env.ZELLIJ_PANE_ID,session:process.env.ZELLIJ_SESSION_NAME,owner:process.env.BOTMUX_OWNER_OPEN_ID,legacy:process.env.__OWNER_OPEN_ID,env:process.env.BMX_TEST_VALUE,unlisted:process.env.BMX_UNLISTED_AUTH,cols:process.stdout.columns,rows:process.stdout.rows,data}));fs.renameSync(${JSON.stringify(report + '.tmp')},${JSON.stringify(report)});};
 process.stdin.setRawMode(true);process.stdin.setEncoding('utf8');
 process.stdin.on('data',s=>{data+=s;save();console.log('INPUT:'+s)});
 process.stdout.on('resize',save);save();console.log('BMX_READY');setInterval(()=>{},1000);
@@ -92,14 +92,14 @@ try {
   await startHost();
   assert.deepEqual(await request('pid').then(r => [r.pid, r.reattach]), [cliPid, true]);
   await request('input', { data: 'AFTER_DETACH' });
-  await until(() => readReport().data.endsWith('AFTER_DETACH'), 'reattached input missing');
+  await until(() => readReport().data?.endsWith('AFTER_DETACH'), 'reattached input missing');
   host.kill();
   await until(() => host.exitCode !== null || host.signalCode !== null, 'second host did not die');
   assert.ok(alive(cliPid), 'CLI must survive unexpected worker death');
   await startHost();
   assert.deepEqual(await request('pid').then(r => [r.pid, r.reattach]), [cliPid, true]);
   await request('input', { data: 'AFTER_CRASH' });
-  await until(() => readReport().data.endsWith('AFTER_CRASH'), 'post-crash input missing');
+  await until(() => readReport().data?.endsWith('AFTER_CRASH'), 'post-crash input missing');
   await request('close');
   await until(() => !alive(cliPid), 'explicit close left the CLI running');
   assert.equal(ZellijBackend.probeSession(name), 'missing');
