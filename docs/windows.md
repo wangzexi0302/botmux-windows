@@ -30,6 +30,8 @@ Windows 单文件发行包和 Electron 安装包均不在本阶段支持范围�
 保留 Windows 默认 PTY、npm 启动器解析、Unicode 输入、原生 Zellij 和 Node IPC 启停。
 上游新增的进程身份校验与 Windows 控制队列共同使用；重复 supervisor 不再清空
 现有实例的命令队列，停止超时仍保留 supervisor。
+Windows 进程身份和命令行查询使用 8 秒有界超时，容纳繁忙机器上 PowerShell/CIM
+首次启动超过 2 秒的情况；无法取得身份时仍拒绝启动或停止目标进程。
 
 严格环境模式在 Windows 上按变量名大小写不敏感匹配 PATH、SystemRoot 和显式授权，
 并过滤不同大小写的宿主凭证与会话身份覆盖。原生 Zellij 同样应用严格注入过滤及

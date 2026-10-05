@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readlinkSync } from 'node:fs';
-import { readDurableProcessIdentity } from '../utils/process-identity.js';
+import { readDurableProcessIdentity, WINDOWS_PROCESS_QUERY_TIMEOUT_MS } from '../utils/process-identity.js';
 import type { FleetState } from './fleet-supervisor-policy.js';
 
 export interface FleetProcessAttestation {
@@ -75,7 +75,7 @@ export function readFleetProcessCommandLine(pid: number): string | undefined {
         '-NonInteractive',
         '-Command',
         `$p = Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\"; if ($p) { $p.CommandLine }`,
-      ], { encoding: 'utf8', timeout: 2_000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      ], { encoding: 'utf8', timeout: WINDOWS_PROCESS_QUERY_TIMEOUT_MS, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
       return value || undefined;
     } catch { return undefined; }
   }
