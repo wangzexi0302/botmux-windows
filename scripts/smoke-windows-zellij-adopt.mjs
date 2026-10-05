@@ -2,7 +2,8 @@
 // processes in the SAME cwd. No authentication, model calls or user sessions.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, realpathSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, realpathSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ZellijBackend } from '../dist/adapters/backend/zellij-backend.js';
@@ -66,13 +67,15 @@ try {
   const ambiguous = discoverAdoptableZellijSessions('codex').filter(p => p.zellijSession === name);
   assert.deepEqual(ambiguous.map(p => p.cliPid), [read(reports[1]).pid], 'duplicate pane identifiers must be refused');
   assert.equal(validateZellijAdoptTarget(name, first.zellijPaneId, first.cliPid, 'codex'), false, 'confirmation also refuses ambiguity');
-  console.log('PASS native Zellij adopt: same-cwd panes, exact PID/pane validation, wrong-pane refusal, targeted Unicode, detach preserves sessions.');
 } catch (error) {
   console.error('Owned fixture input:', reports.map(path => read(path)));
   throw error;
 } finally {
   observer?.kill(); backend.destroySession();
   await until(() => [...reports, duplicateReport].every(path => !read(path).pid || !alive(read(path).pid)), 'owned smoke process cleanup failed', 10000);
-  rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  // ConPTY close callbacks must run before Windows releases its cwd handles.
+  // Async removal yields to them and retries transient EBUSY without hiding it.
+  await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }
+console.log('PASS native Zellij adopt: same-cwd panes, exact PID/pane validation, wrong-pane refusal, targeted Unicode, detach preserves sessions, owned fixture cleanup.');
 process.exit(0);

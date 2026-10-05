@@ -2,7 +2,8 @@
 // reattach to the SAME CLI process, and explicit close. No model calls.
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ZellijBackend } from '../dist/adapters/backend/zellij-backend.js';
@@ -124,6 +125,6 @@ try {
   for (const child of allHosts) if (child.exitCode === null && child.signalCode === null) child.kill();
   ZellijBackend.killSession(name);
   await pause(1500);
-  if (!cliPid || !alive(cliPid)) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  if (!cliPid || !alive(cliPid)) await rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   else console.error(`Fixture still alive; diagnostic directory retained: ${dir}`);
 }
