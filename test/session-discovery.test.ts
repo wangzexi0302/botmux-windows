@@ -242,13 +242,13 @@ function setupMocks(opts: {
 
   // Replace blanket existsSync / readdirSync mocks with procFdMap-aware ones.
   mockExistsSync.mockImplementation((path: unknown) => {
-    const pathStr = String(path);
+    const pathStr = String(path).replaceAll('\\', '/');
     const fdMatch = pathStr.match(/^\/proc\/(\d+)\/fd$/);
     if (fdMatch) return Number(fdMatch[1]) in procFdMap;
     return false;
   });
   mockReaddirSync.mockImplementation(((path: unknown) => {
-    const pathStr = String(path);
+    const pathStr = String(path).replaceAll('\\', '/');
     const fdMatch = pathStr.match(/^\/proc\/(\d+)\/fd$/);
     if (fdMatch) {
       const pid = Number(fdMatch[1]);
@@ -312,7 +312,7 @@ function setupMocks(opts: {
   });
 
   mockReadFileSync.mockImplementation((path: unknown) => {
-    const pathStr = String(path);
+    const pathStr = String(path).replaceAll('\\', '/');
 
     // /proc/<pid>/comm
     const commMatch = pathStr.match(/\/proc\/(\d+)\/comm/);
@@ -361,7 +361,7 @@ function setupMocks(opts: {
   });
 
   mockReadlinkSync.mockImplementation((path: unknown) => {
-    const pathStr = String(path);
+    const pathStr = String(path).replaceAll('\\', '/');
     const cwdMatch = pathStr.match(/\/proc\/(\d+)\/cwd/);
     if (cwdMatch) {
       const pid = Number(cwdMatch[1]);

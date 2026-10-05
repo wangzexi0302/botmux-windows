@@ -19,7 +19,13 @@ const {spawn}=require('node:child_process');
 const fs=require('node:fs');
 const spec=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
 fs.unlinkSync(process.argv[1]);
-const child=spawn(spec.bin,spec.args,{cwd:spec.cwd,env:spec.env,stdio:'inherit',windowsHide:true});
+// Zellij assigns pane metadata after the bootstrap is created. Carry only
+// these non-secret identifiers into the CLI; never re-inherit the server env.
+const env={...spec.env};
+for(const key of ['ZELLIJ','ZELLIJ_PANE_ID','ZELLIJ_SESSION_NAME']) {
+ if(process.env[key]!==undefined) env[key]=process.env[key];
+}
+const child=spawn(spec.bin,spec.args,{cwd:spec.cwd,env,stdio:'inherit',windowsHide:true});
 process.on('SIGINT',()=>{});
 child.on('error',e=>{console.error('Botmux pane launch failed: '+e.message);process.exit(1)});
 child.on('exit',code=>process.exit(code??1));

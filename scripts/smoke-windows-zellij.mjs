@@ -22,7 +22,7 @@ const arg = '中文“引号”——→→ 😀😀 café a&b %PATH% "quoted"';
 writeFileSync(fixture, `
 const fs=require('node:fs');
 let data='';
-const save=()=>fs.writeFileSync(${JSON.stringify(report)},JSON.stringify({pid:process.pid,argv:process.argv.slice(2),cwd:process.cwd(),owner:process.env.BOTMUX_OWNER_OPEN_ID,legacy:process.env.__OWNER_OPEN_ID,env:process.env.BMX_TEST_VALUE,unlisted:process.env.BMX_UNLISTED_AUTH,cols:process.stdout.columns,rows:process.stdout.rows,data}));
+const save=()=>fs.writeFileSync(${JSON.stringify(report)},JSON.stringify({pid:process.pid,argv:process.argv.slice(2),cwd:process.cwd(),pane:process.env.ZELLIJ_PANE_ID,session:process.env.ZELLIJ_SESSION_NAME,owner:process.env.BOTMUX_OWNER_OPEN_ID,legacy:process.env.__OWNER_OPEN_ID,env:process.env.BMX_TEST_VALUE,unlisted:process.env.BMX_UNLISTED_AUTH,cols:process.stdout.columns,rows:process.stdout.rows,data}));
 process.stdin.setRawMode(true);process.stdin.setEncoding('utf8');
 process.stdin.on('data',s=>{data+=s;save();console.log('INPUT:'+s)});
 process.stdout.on('resize',save);save();console.log('BMX_READY');setInterval(()=>{},1000);
@@ -77,6 +77,8 @@ try {
   assert.equal(readReport().env, arg + '\nsecond line');
   assert.equal(readReport().owner, 'test-owner');
   assert.equal(readReport().legacy, 'test-owner');
+  assert.equal(readReport().pane, '0');
+  assert.equal(readReport().session, name);
   assert.equal(readReport().unlisted, strictEnv ? undefined : 'host-sentinel');
   await until(async () => (await request('pid')).pid === cliPid, 'native CLI PID discovery');
   const first = '\x1b[200~' + arg + '\n' + '中文——'.repeat(250) + '\x1b[201~';

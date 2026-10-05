@@ -11,27 +11,33 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { mkdtempSync, rmSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
+import { once } from 'node:events';
 import {
   __testOnly_readComm,
   __testOnly_readCwd,
   __testOnly_getChildPids,
+  readCmdline, readProcessStartTime,
 } from '../src/core/session-discovery.js';
+import { windowsProcessContext, splitWindowsCommandLine } from '../src/utils/windows-process.js';
 
 let child: ChildProcessWithoutNullStreams;
 let childCwd: string;
+let tempRoot: string;
 
 beforeAll(async () => {
   // macOS 的 tmpdir 通常是 /var/folders/.. 的软链，真实路径在 /private/var/...
   // lsof 返回 resolve 后的路径，提前 realpath 一下让断言里两边形态一致。
-  childCwd = realpathSync(mkdtempSync(join(tmpdir(), 'bmx-sd-')));
+  tempRoot = realpathSync(mkdtempSync(join(tmpdir(), 'bmx-sd-')));
+  childCwd = join(tempRoot, '进程 探测 😀');
+  mkdirSync(childCwd);
   // 用一个会保持运行 60s 的 Node 子进程当 target。stdout 输出 "ready" 后
   // 才认为 cwd / pid 都已稳定。
   child = spawn(
     process.execPath,
-    ['-e', 'process.stdout.write("ready\\n"); setTimeout(() => {}, 60000);'],
-    { cwd: childCwd, stdio: ['ignore', 'pipe', 'pipe'] },
+    ['-e', 'process.stdout.write("ready\\n"); setTimeout(() => {}, 60000);', '引号“” 😀 a&b'],
+    { cwd: childCwd, env: { ...process.env, ZELLIJ_PANE_ID: '42', BMX_PRIVATE_PROBE_SENTINEL: 'must-not-be-returned' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
   ) as ChildProcessWithoutNullStreams;
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('child not ready in 5s')), 5000);
@@ -45,9 +51,30 @@ beforeAll(async () => {
   });
 });
 
-afterAll(() => {
-  if (child && !child.killed) child.kill('SIGKILL');
-  if (childCwd) rmSync(childCwd, { recursive: true, force: true });
+afterAll(async () => {
+  if (child && child.exitCode === null && child.signalCode === null) {
+    const closed = once(child, 'close');
+    child.kill('SIGKILL');
+    await closed;
+  }
+  if (tempRoot) rmSync(tempRoot, { recursive: true, force: true });
+});
+
+describe('native process identity', () => {
+  it('reads the command line and process birth time', () => {
+    expect(readCmdline(child.pid!).join(' ')).toContain('引号“” 😀 a&b');
+    expect(readProcessStartTime(child.pid!)).toBeGreaterThan(Date.now() - 60_000);
+  });
+  it.runIf(process.platform === 'win32')('returns only cwd, pane identifier and birth time from native process memory', () => {
+    const context = windowsProcessContext(child.pid!);
+    expect(context).toEqual({ cwd: childCwd, paneId: 'terminal_42', created: readProcessStartTime(child.pid!) });
+    expect(windowsProcessContext(-1)).toBeUndefined();
+  });
+  it('parses Windows drive/UNC paths, quotes, empty arguments and Unicode without shell expansion', () => {
+    expect(splitWindowsCommandLine(String.raw`"C:\\Program Files\\node.exe" "\\\\server\\share\\codex.js" "" "中文 😀 %PATH% a&b"`))
+      .toEqual([String.raw`C:\\Program Files\\node.exe`, String.raw`\\\\server\\share\\codex.js`, '', '中文 😀 %PATH% a&b']);
+    expect(splitWindowsCommandLine('node "unterminated')).toEqual([]);
+  });
 });
 
 describe('readComm', () => {

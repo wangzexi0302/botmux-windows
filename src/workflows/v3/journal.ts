@@ -45,7 +45,7 @@ export type {
 } from './event-contract.js';
 
 function fsyncFile(journalPath: string): void {
-  const fd = openSync(journalPath, 'r');
+  const fd = openSync(journalPath, process.platform === 'win32' ? 'r+' : 'r');
   try {
     fsyncSync(fd);
   } finally {

@@ -481,7 +481,7 @@ describe('installHook — claude-settings', () => {
     });
     expect(settings.theme).toBe('local-theme');
     expect(JSON.stringify(settings)).not.toContain('global-unrelated-hook');
-    expect(statSync(configPath).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') expect(statSync(configPath).mode & 0o777).toBe(0o600);
 
     // Shared provider auth rotates: the next cold-spawn install refreshes it.
     writeFileSync(globalPath, JSON.stringify({
@@ -504,7 +504,7 @@ describe('installHook — claude-settings', () => {
     expect(settings.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
     expect(settings.env.ANTHROPIC_BASE_URL).toBeUndefined();
     expect(settings.env.BOT_LOCAL_ONLY).toBe('preserved');
-    expect(statSync(`${configPath}.botmux-inherited-env.json`).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') expect(statSync(`${configPath}.botmux-inherited-env.json`).mode & 0o777).toBe(0o600);
   });
 
   it('credential-source mode excludes auth keys from the inherited env and scrubs stale ones', () => {

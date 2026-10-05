@@ -51,7 +51,7 @@ beforeEach(() => {
   fakeFs.syncErrorCode = undefined;
 });
 
-describe('portable directory fsync error policy', () => {
+describe.skipIf(process.platform === 'win32')('POSIX directory fsync error policy', () => {
   it('degrades only unsupported open/fsync errnos to best-effort', () => {
     fakeFs.openErrorCode = 'EINVAL';
     expect(() => fsyncDirectorySyncPortable('/virtual/run')).not.toThrow();
@@ -73,4 +73,10 @@ describe('portable directory fsync error policy', () => {
     expect(() => fsyncDirectorySyncPortable('/virtual/run')).toThrow(/EACCES/);
     expect(fakeFs.closeCount).toBe(1);
   });
+});
+
+it.runIf(process.platform === 'win32')('Windows directory durability uses the documented best-effort fallback', () => {
+  fakeFs.openErrorCode = 'EPERM';
+  expect(() => fsyncDirectorySyncPortable('C:\\virtual\\run')).not.toThrow();
+  expect(fakeFs.closeCount).toBe(0);
 });

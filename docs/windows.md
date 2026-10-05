@@ -17,9 +17,9 @@ Codex / Claude Code 共用的启动处理。Windows 默认使用 PTY，Linux/mac
 这是开发中的原生适配。已验证 **飞书私聊 → 原生 Codex CLI → 飞书文字回复**；
 Claude Code 的飞书完整链路仍待验证。版本 smoke 不调用模型；输入 smoke 只检查
 真实 Codex 输入框，不提交 prompt。
-2026-09-13 本机 Claude Code 已登录，模型请求测试遇到服务端 HTTP 503，尚未取得成功响应。
-已加入原生 Zellij 托管会话后端，详见下节。Windows 上的完整单元测试套件、CLI hooks 和
-所有 CLI 的会话恢复仍需继续验证。直接 PTY 会话不跨 daemon 重启存活；tmux /adopt、Unix 文件沙盒、
+2026-10-06 Claude 服务仍返回 HTTP 503，可用分组的模型列表为空；按用户要求暂缓真实 Claude 验收。
+已加入原生 Zellij 托管会话后端与 `/adopt`，详见下节。CLI hooks 与 Codex 会话恢复已验证；
+全部上游功能及其它 CLI 的真实恢复仍未完成 Windows 验收。直接 PTY 会话不跨 daemon 重启存活；tmux /adopt、Unix 文件沙盒、
 Windows 单文件发行包和 Electron 安装包均不在本阶段支持范围。
 原生 tmux 移植版需要另行验证 botmux 的 control-mode / pipe-pane / reattach 行为；
 需要上游现有完整运行环境时使用 WSL2。
@@ -83,15 +83,44 @@ Windows 通过 Node 的独立 pane 启动器运行 CLI，复用 `.exe` / npm `.c
 ```powershell
 bun run test -- test/windows-zellij.test.ts test/zellij-backend-helpers.test.ts test/zellij-frozen-reattach.test.ts test/zellij-observe-backend.test.ts test/zellij-session-discovery.test.ts
 node scripts/smoke-windows-zellij.mjs
+node scripts/smoke-windows-zellij-adopt.mjs
 node scripts/smoke-windows-zellij-cli.mjs <Codex启动器绝对路径> <Claude启动器绝对路径>
 ```
 
 真实生命周期 smoke 验证中文/引号/emoji/多行输入、窗口缩放、参数与环境、管理员
 身份、正常断开和工作进程意外退出后同 PID 重连、明确关闭后的 CLI 清理。
 真实 CLI smoke 验证 Codex 输入框内容跨重连保持，以及 Claude 原生启动，不提交模型请求。
-Windows CI 下载带固定 SHA-256 的 Zellij 0.45.1 并执行生命周期 smoke；Linux CI
-运行现有 Zellij 后端测试。原生 Windows `/adopt`、手动重命名会话、系统重启后的恢复
-以及 Zellij 内完整 Claude 模型调用仍未验收。
+Windows CI 下载带固定 SHA-256 的 Zellij 0.45.1，执行生命周期和多 pane 接管 smoke；Linux CI
+运行现有 Zellij 后端测试。原生 Windows `/adopt` 按 pane 标识绑定进程，拒绝缺失或重复标识，
+并在接管前核对对应 pane 与 PID；相同工作目录中的多个 Codex pane 不依赖 PID 排序。
+工作目录和 pane 标识通过只读的 Windows x86/x64 进程参数探测取得；无法读取或进程身份改变时拒绝接管。
+这个探测依赖 Windows 进程参数布局，当前验收平台为 x64 Windows；其它架构仍需验证。
+
+Zellij **0.45.1 原生 Windows 手动重命名会话暂不支持**：本机复现官方 `action rename-session`
+后，新名称的 `action list-panes` 无法连接。Botmux 对这类名称变化拒绝猜测进程，避免接管错误会话。
+Codex 冷恢复已模拟终止旧 Zellij server 后重新创建进程，恢复同一 CLI 会话和历史；未执行真实系统重启。
+Zellij 内完整 Claude 模型调用按用户要求暂缓。
+
+## 2026-10-06 接管、hooks 与恢复验证
+
+修复 Windows hook 命令中反斜杠被当作 shell 转义、超时遗留孙进程的问题；hooks 保留最小环境白名单。
+严格模式 pane 启动器仅从 Zellij 继承三个 pane/session 标识，保留凭证隔离。
+接管输入复用 ConPTY Unicode 编码，并在一次输入中传送粘贴帧，保留标点、emoji 和多行正文。
+Windows 日志持久化以可写句柄执行文件 flush，继续传播真实 I/O 错误；目录 flush 仍是已说明的 best-effort。
+源码及嵌入文本固定 LF，避免 Windows checkout 的 CRLF 改变源码检测和嵌入资产。
+
+本机 Node 24.16.0 / Bun 1.4.2：17 个接管、hooks、CLI 适配器、恢复及持久化测试文件，
+**875 项通过、6 项平台限定跳过**。正常/严格环境真实 Zellij 生命周期与多 pane 接管 smoke 通过。
+真实 Codex 0.154.0 使用目录中可用的 `gpt-5.6-luna` 完成模型调用和两轮会话续接；
+原生 Zellij 中通过真实 Codex 接管、Unicode 输入框、同 PID 重连及新 PID 冷恢复。
+其它 CLI 的启动/恢复参数与 hook 安装由适配器单测覆盖，未据此宣称全部 CLI 的真实模型链路已验收。
+
+同时执行了 Windows 上的全部 1,551 个单测文件。修改期间的探索性扫描记录为
+25,653 项通过、1,962 项失败、274 项跳过；一个未退出的测试 worker 被单独终止后生成报告。
+这份结果不是最终验收，也不是当前剩余失败数：后续已修复 LF、进程探测、hooks、文件 flush 等问题。
+29 个涉及 flush 的文件重测为 390 项通过、69 项失败、3 项跳过，剩余涉及 POSIX 权限、路径和其它工作流行为。
+全套仍包含 Unix shell/IPC、符号链接权限、HOME/POSIX 路径以及未移植的上游功能，**全套 Windows 单测尚未全绿**。
+Windows CI 是上述已支持路径的阻塞验证；Linux CI 继续执行全部上游单测。
 
 ## 本地构建和验证
 

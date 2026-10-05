@@ -33,6 +33,21 @@ afterEach(() => {
 });
 
 describe('parseHookCommand', () => {
+  it('preserves Windows drive, UNC, Unicode paths and empty arguments', () => {
+    expect(parseHookCommand('"C:\\Program Files\\node.exe" "C:\\工作区\\hook.js" "" "\\\\server\\共享\\a b"', 'win32')).toEqual({
+      file: 'C:\\Program Files\\node.exe',
+      args: ['C:\\工作区\\hook.js', '', '\\\\server\\共享\\a b'],
+    });
+    expect(parseHookCommand('C:\\node\\node.exe C:\\工作区\\hook.js', 'win32')).toEqual({
+      file: 'C:\\node\\node.exe', args: ['C:\\工作区\\hook.js'],
+    });
+  });
+
+  it('retains POSIX escaping and handles Windows escaped quotes', () => {
+    expect(parseHookCommand('node two\\ words ""', 'linux')).toEqual({ file: 'node', args: ['two words', ''] });
+    expect(parseHookCommand('node "say \\"hi\\""', 'win32')).toEqual({ file: 'node', args: ['say "hi"'] });
+  });
+
   it('splits command strings without invoking a shell', () => {
     expect(parseHookCommand('/usr/bin/env node "two words"')).toEqual({
       file: '/usr/bin/env',
@@ -42,6 +57,7 @@ describe('parseHookCommand', () => {
 
   it('rejects empty or malformed command strings', () => {
     expect(() => parseHookCommand('')).toThrow(/empty/i);
+    expect(() => parseHookCommand('""')).toThrow(/empty/i);
     expect(() => parseHookCommand('node "unterminated')).toThrow(/unterminated/i);
   });
 });
@@ -398,6 +414,26 @@ describe('runHookCommandForTest', () => {
     expect(Date.now() - started).toBeLessThan(2000);
   });
 
+  it.runIf(process.platform === 'win32')('cleans up a timed-out hook and its native descendant', async () => {
+    const marker = join(tmpDir, 'descendant-pids.json');
+    const script = join(tmpDir, 'tree.cjs');
+    writeFileSync(script, `const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{windowsHide:true,stdio:'ignore'});require('node:fs').writeFileSync(${JSON.stringify(marker)},JSON.stringify([process.pid,child.pid]));setInterval(()=>{},1000);`);
+    const result = await runHookCommandForTest(
+      { event: 'schedule.fired', command: `"${process.execPath}" "${script}"`, timeoutMs: 1500 },
+      { event: 'schedule.fired' },
+    );
+    expect(result.timedOut).toBe(true);
+    const pids: number[] = JSON.parse(readFileSync(marker, 'utf8'));
+    const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    try {
+      const deadline = Date.now() + 5000;
+      while (pids.some(alive) && Date.now() < deadline) await new Promise(r => setTimeout(r, 50));
+      expect(pids.filter(alive)).toEqual([]);
+    } finally {
+      for (const pid of pids) if (alive(pid)) process.kill(pid);
+    }
+  });
+
   it('does not keep CLI-style emitHookEvent processes alive for running hooks', () => {
     const started = Date.now();
     // Node needs `--import tsx` on top of the eval args because the snippet
@@ -459,7 +495,7 @@ describe('runHookCommandForTest', () => {
           BOTMUX_SESSION_ID: 'sid-leaked-into-daemon',
           BOTMUX_LARK_APP_ID: 'cli_leaked_into_daemon',
           BOTMUX_HOOKS_JSON: JSON.stringify([
-            { event: 'outbound.send', command: `/usr/bin/touch ${marker}`, timeoutMs: 5000 },
+            { event: 'outbound.send', command: `"${process.execPath}" -e "require('node:fs').writeFileSync(process.argv[1], '')" "${marker}"`, timeoutMs: 5000 },
           ]),
         },
         timeout: 5000,

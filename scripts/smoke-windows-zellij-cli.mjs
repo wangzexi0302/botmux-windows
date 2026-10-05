@@ -12,7 +12,7 @@ async function until(predicate, message, timeout = 25000) {
   while (Date.now() < end) { if (predicate()) return; await pause(100); }
   throw new Error(message);
 }
-for (const cli of ['codex', 'claude-code']) {
+for (const cli of process.argv.includes('--codex-only') ? ['codex'] : ['codex', 'claude-code']) {
   const name = `bmx-cli-smoke-${process.pid}-${cli}`;
   const adapter = createCliAdapterSync(cli, cli === 'codex' ? process.argv[2] : process.argv[3]);
   let backend = new ZellijBackend(name);
