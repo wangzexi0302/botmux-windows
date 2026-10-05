@@ -353,7 +353,7 @@ describe('setCodexAppThreadName', () => {
     expect(methods).not.toContain('thread/name/set');
   });
 
-  it('sets the final title when the first-message preview remains unavailable', async () => {
+  it.each([0, 300])('sets the final title when the first-message preview remains unavailable (read delay %i ms)', async (readDelayMs) => {
     const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-thread-title-fallback-'));
     tempDirs.push(dir);
     const logPath = join(dir, 'requests.jsonl');
@@ -367,6 +367,7 @@ describe('setCodexAppThreadName', () => {
         ...process.env,
         FAKE_CODEX_LOG: logPath,
         FAKE_CODEX_PREVIEW_DELAY_READS: '999999',
+        FAKE_CODEX_PREVIEW_READ_DELAY_MS: String(readDelayMs),
       },
       timeoutMs: 200,
       initializeTimeoutMs: 2_000,

@@ -21,6 +21,7 @@ const logPath = process.env.FAKE_CODEX_LOG;
 const pidPath = process.env.FAKE_CODEX_PID_PATH;
 const behavior = process.env.FAKE_CODEX_BEHAVIOR ?? 'success';
 const previewDelayReads = Number(process.env.FAKE_CODEX_PREVIEW_DELAY_READS ?? '0');
+const previewReadDelayMs = Number(process.env.FAKE_CODEX_PREVIEW_READ_DELAY_MS ?? '0');
 const threadNotLoadedReads = Number(process.env.FAKE_CODEX_THREAD_NOT_LOADED_READS ?? '0');
 const updatedDelayReads = Number(process.env.FAKE_CODEX_UPDATED_DELAY_READS ?? '0');
 const updatedBefore = Number(process.env.FAKE_CODEX_UPDATED_BEFORE ?? '100');
@@ -417,14 +418,17 @@ function handle(request) {
       reject(request.id, -32600, `thread not loaded: ${request.params.threadId}`);
       return;
     }
-    respond(request.id, {
+    const result = {
       thread: {
         id: request.params.threadId,
         name: currentThreadName ?? null,
         preview: threadReadAttempt > previewDelayReads ? '<botmux_routing> 首条消息预览' : '',
         updatedAt: threadReadAttempt > updatedDelayReads ? updatedAfter : updatedBefore,
       },
-    });
+    };
+    if (!currentThreadName && previewReadDelayMs > 0) {
+      setTimeout(() => respond(request.id, result), previewReadDelayMs);
+    } else respond(request.id, result);
     return;
   }
   if (request.method === 'thread/name/set') {
