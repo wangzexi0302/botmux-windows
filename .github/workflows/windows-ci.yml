@@ -57,7 +57,7 @@ jobs:
       - name: Verify Zellij platform boundaries and existing session behavior
         run: bun run test -- test/windows-zellij.test.ts test/zellij-backend-helpers.test.ts test/zellij-frozen-reattach.test.ts test/zellij-observe-backend.test.ts test/zellij-session-discovery.test.ts
       - name: Verify native process discovery, hooks and session recovery
-        run: bun run test -- test/session-discovery.test.ts test/session-discovery.smoke.test.ts test/zellij-cli-detection.test.ts test/hook-command.test.ts test/hook-installer.test.ts test/hook-runner.test.ts test/hook-runner-cache.test.ts test/session-resume.test.ts test/restore-zombie-close.test.ts test/resume-fresh-policy.test.ts test/v3-portable-resume-integrity.test.ts test/fs-durability.test.ts test/fs-durability-errors.test.ts
+        run: bun run test -- test/session-discovery.test.ts test/session-discovery.smoke.test.ts test/zellij-cli-detection.test.ts test/hook-command.test.ts test/hook-installer.test.ts test/hook-runner.test.ts test/hook-runner-cache.test.ts test/session-resume.test.ts test/restore-zombie-close.test.ts test/resume-fresh-policy.test.ts test/v3-portable-resume-integrity.test.ts test/fs-durability.test.ts test/fs-durability-errors.test.ts --maxWorkers=2
       - name: Install pinned native Zellij for lifecycle smoke
         if: runner.os == 'Windows'
         shell: pwsh

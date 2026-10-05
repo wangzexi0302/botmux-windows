@@ -25,18 +25,32 @@ import { windowsProcessContext, splitWindowsCommandLine } from '../src/utils/win
 let child: ChildProcessWithoutNullStreams;
 let childCwd: string;
 let tempRoot: string;
+let childLaunchedAt: number;
+
+// A cold PowerShell/CIM/CodeDom start can exhaust a bounded query on a busy
+// Windows runner. Re-probe after a failure, just as a new discovery request
+// would; never turn an unreadable identity into a successful match.
+async function probe<T>(read: () => T | undefined): Promise<T | undefined> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const value = read();
+    if (value !== undefined) return value;
+    await new Promise(resolve => setTimeout(resolve, 1100));
+  }
+  return undefined;
+}
 
 beforeAll(async () => {
   // macOS 的 tmpdir 通常是 /var/folders/.. 的软链，真实路径在 /private/var/...
   // lsof 返回 resolve 后的路径，提前 realpath 一下让断言里两边形态一致。
-  tempRoot = realpathSync(mkdtempSync(join(tmpdir(), 'bmx-sd-')));
+  tempRoot = realpathSync.native(mkdtempSync(join(tmpdir(), 'bmx-sd-')));
   childCwd = join(tempRoot, '进程 探测 😀');
   mkdirSync(childCwd);
-  // 用一个会保持运行 60s 的 Node 子进程当 target。stdout 输出 "ready" 后
+  // 子进程保持运行直到 afterAll 明确关闭。stdout 输出 "ready" 后
   // 才认为 cwd / pid 都已稳定。
+  childLaunchedAt = Date.now();
   child = spawn(
     process.execPath,
-    ['-e', 'process.stdout.write("ready\\n"); setTimeout(() => {}, 60000);', '引号“” 😀 a&b'],
+    ['-e', 'process.stdout.write("ready\\n"); setInterval(() => {}, 1000);', '引号“” 😀 a&b'],
     { cwd: childCwd, env: { ...process.env, ZELLIJ_PANE_ID: '42', BMX_PRIVATE_PROBE_SENTINEL: 'must-not-be-returned' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
   ) as ChildProcessWithoutNullStreams;
   await new Promise<void>((resolve, reject) => {
@@ -61,15 +75,19 @@ afterAll(async () => {
 });
 
 describe('native process identity', () => {
-  it('reads the command line and process birth time', () => {
-    expect(readCmdline(child.pid!).join(' ')).toContain('引号“” 😀 a&b');
-    expect(readProcessStartTime(child.pid!)).toBeGreaterThan(Date.now() - 60_000);
-  });
-  it.runIf(process.platform === 'win32')('returns only cwd, pane identifier and birth time from native process memory', () => {
-    const context = windowsProcessContext(child.pid!);
-    expect(context).toEqual({ cwd: childCwd, paneId: 'terminal_42', created: readProcessStartTime(child.pid!) });
+  it('reads the command line and process birth time', async () => {
+    const argv = await probe(() => { const a = readCmdline(child.pid!); return a.length ? a : undefined; });
+    expect(argv?.join(' ')).toContain('引号“” 😀 a&b');
+    const created = await probe(() => readProcessStartTime(child.pid!));
+    expect(created).toBeGreaterThanOrEqual(childLaunchedAt - 1000);
+    expect(created).toBeLessThanOrEqual(Date.now());
+  }, 60_000);
+  it.runIf(process.platform === 'win32')('returns only cwd, pane identifier and birth time from native process memory', async () => {
+    const context = await probe(() => windowsProcessContext(child.pid!));
+    const created = await probe(() => readProcessStartTime(child.pid!));
+    expect(context).toEqual({ cwd: childCwd, paneId: 'terminal_42', created });
     expect(windowsProcessContext(-1)).toBeUndefined();
-  });
+  }, 60_000);
   it('parses Windows drive/UNC paths, quotes, empty arguments and Unicode without shell expansion', () => {
     expect(splitWindowsCommandLine(String.raw`"C:\\Program Files\\node.exe" "\\\\server\\share\\codex.js" "" "中文 😀 %PATH% a&b"`))
       .toEqual([String.raw`C:\\Program Files\\node.exe`, String.raw`\\\\server\\share\\codex.js`, '', '中文 😀 %PATH% a&b']);
