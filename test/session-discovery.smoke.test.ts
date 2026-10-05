@@ -99,8 +99,11 @@ describe('native process identity', () => {
     expect(windowsProcessContext(-1)).toBeUndefined();
   }, 60_000);
   it('parses Windows drive/UNC paths, quotes, empty arguments and Unicode without shell expansion', () => {
-    expect(splitWindowsCommandLine(String.raw`"C:\\Program Files\\node.exe" "\\\\server\\share\\codex.js" "" "中文 😀 %PATH% a&b"`))
-      .toEqual([String.raw`C:\\Program Files\\node.exe`, String.raw`\\\\server\\share\\codex.js`, '', '中文 😀 %PATH% a&b']);
+    // Bun 1.4.2 rewrites non-ASCII raw-template text to literal Unicode escapes.
+    // Interpolation keeps the actual characters while preserving path slashes.
+    const unicode = '中文 😀 %PATH% a&b';
+    expect(splitWindowsCommandLine(String.raw`"C:\\Program Files\\node.exe" "\\\\server\\share\\codex.js" "" "${unicode}"`))
+      .toEqual([String.raw`C:\\Program Files\\node.exe`, String.raw`\\\\server\\share\\codex.js`, '', unicode]);
     expect(splitWindowsCommandLine('node "unterminated')).toEqual([]);
   });
 });
