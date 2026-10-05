@@ -33,6 +33,14 @@ export function windowsProcesses(fresh = false): WindowsProcessInfo[] {
   return rows;
 }
 
+/** ParentProcessId can outlive its parent and then name an unrelated process
+ * that reused the PID. Such an old child predates the current parent's birth. */
+export function windowsChildPids(pid: number, rows = windowsProcesses()): number[] {
+  const parent = rows.find(p => p.pid === pid);
+  if (!parent) return [];
+  return rows.filter(p => p.parent === pid && p.created >= parent.created).map(p => p.pid);
+}
+
 /** Windows command-line quoting, without invoking cmd or expanding %variables%. */
 export function splitWindowsCommandLine(command: string): string[] {
   const args: string[] = [];

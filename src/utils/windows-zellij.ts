@@ -6,6 +6,7 @@ import { locateExecutable } from './executable.js';
 import { resolveExecutableLaunch } from './pty-launch.js';
 import { applySessionOwnerEnv } from './child-env.js';
 import { encodeWindowsPtyInput } from './windows-pty-input.js';
+import { windowsChildPids } from './windows-process.js';
 import { resolveBotmuxWrapperBinDir } from '../core/botmux-wrapper.js';
 import type { SpawnOpts } from '../adapters/backend/types.js';
 import { zellijEnv } from '../setup/ensure-zellij.js';
@@ -127,10 +128,12 @@ export function findWindowsZellijProcess(session: string, cli: boolean): number 
       const arg = server.command?.match(/(?:^|\s)--server\s+(?:"([^"]+)"|(\S+))/);
       if (!arg || !refersToSameMarker(arg[1] ?? arg[2]!, marker)) continue;
       if (!cli) { matches.push(pid); continue; }
-      const runners = tree.filter(p => p.parent === pid && p.name?.toLowerCase() === 'node.exe'
+      const serverChildren = windowsChildPids(pid, tree);
+      const runners = tree.filter(p => serverChildren.includes(p.pid) && p.name?.toLowerCase() === 'node.exe'
         && p.command?.includes('/* botmux-zellij-pane */'));
       if (runners.length !== 1) continue;
-      const children = tree.filter(p => p.parent === runners[0]!.pid && p.name?.toLowerCase() !== 'conhost.exe');
+      const runnerChildren = windowsChildPids(runners[0]!.pid, tree);
+      const children = tree.filter(p => runnerChildren.includes(p.pid) && p.name?.toLowerCase() !== 'conhost.exe');
       if (children.length === 1) matches.push(children[0]!.pid);
     }
     return matches.length === 1 ? matches[0]! : null;

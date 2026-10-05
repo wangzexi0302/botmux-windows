@@ -20,7 +20,7 @@ import {
   __testOnly_getChildPids,
   readCmdline, readProcessStartTime,
 } from '../src/core/session-discovery.js';
-import { windowsProcessContext, splitWindowsCommandLine } from '../src/utils/windows-process.js';
+import { windowsProcessContext, windowsChildPids, splitWindowsCommandLine, type WindowsProcessInfo } from '../src/utils/windows-process.js';
 
 let child: ChildProcessWithoutNullStreams;
 let childCwd: string;
@@ -75,6 +75,16 @@ afterAll(async () => {
 });
 
 describe('native process identity', () => {
+  it('does not attach an orphan to a recycled parent PID', () => {
+    const rows: WindowsProcessInfo[] = [
+      { pid: 100, parent: 1, created: 2000, name: 'zellij.exe', command: '' },
+      { pid: 101, parent: 100, created: 1000, name: 'codex.exe', command: '' },
+      { pid: 102, parent: 100, created: 2000, name: 'node.exe', command: '' },
+      { pid: 103, parent: 100, created: 3000, name: 'codex.exe', command: '' },
+    ];
+    expect(windowsChildPids(100, rows)).toEqual([102, 103]);
+    expect(windowsChildPids(99, rows)).toEqual([]);
+  });
   it('reads the command line and process birth time', async () => {
     const argv = await probe(() => { const a = readCmdline(child.pid!); return a.length ? a : undefined; });
     expect(argv?.join(' ')).toContain('引号“” 😀 a&b');

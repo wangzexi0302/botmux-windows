@@ -15,7 +15,7 @@ import { findCocoSessionByPid } from '../services/coco-transcript.js';
 import { findTraexRolloutByPid } from '../services/traex-transcript.js';
 import { tmuxEnv } from '../setup/ensure-tmux.js';
 import { herdrExecutable } from '../utils/herdr-executable.js';
-import { windowsProcesses, windowsProcessCwd, splitWindowsCommandLine } from '../utils/windows-process.js';
+import { windowsProcesses, windowsChildPids, windowsProcessCwd, splitWindowsCommandLine } from '../utils/windows-process.js';
 import { resolveExecutableLaunch } from '../utils/pty-launch.js';
 
 // macOS 没有 /proc，所以走 ps/lsof/pgrep 兜底。Linux 仍优先走 /proc 快路径。
@@ -483,7 +483,7 @@ export function readProcessStartTime(pid: number): number | undefined {
  * 低频操作（只在用户 /adopt 时跑一遍）。
  */
 export function getChildPids(pid: number): number[] {
-  if (IS_WINDOWS) return windowsProcesses().filter(p => p.parent === pid).map(p => p.pid);
+  if (IS_WINDOWS) return windowsChildPids(pid);
   try {
     const out = execSync('ps -A -o pid= -o ppid=', {
       encoding: 'utf-8',
