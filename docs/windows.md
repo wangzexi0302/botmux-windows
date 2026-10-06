@@ -126,6 +126,9 @@ Windows CI 是上述已支持路径的阻塞验证；Linux CI 继续执行全部
 
 ## 2026-10-06 Claude / DeepSeek 真实验收
 
+继续合入上游 `f0eb0fc67`：包含 Dashboard 预检端口死锁修复、定时任务受限委托、
+会话群头像、Herdr 原生 CLI 身份和 Pi 用量解析支持。
+
 使用原生 Claude Code **2.1.291**、DeepSeek Anthropic 兼容接口和该账户模型列表中的
 `deepseek-flash`，在独立配置目录及包含中文、空格和 emoji 的工作目录中验证：
 
@@ -140,6 +143,9 @@ Windows CI 是上述已支持路径的阻塞验证；Linux CI 继续执行全部
 验收发现并修复两处原生 Windows 问题：Claude 使用正斜杠的项目信任键，托管及隔离
 配置目录均按此写入，避免首次启动停在信任页；接管 hook 的祖先进程查询使用一次原生
 进程快照，校验父子创建时间，拒绝已复用的父 PID。Linux/macOS 的祖先查询及信任路径保持原有行为。
+
+合并上游后重新构建通过；12 个 Claude/接管/输入/hook 相关文件为 739 项通过、4 项跳过，
+10 个本轮上游定时委托、端口探测、头像及恢复相关文件为 127 项通过。
 
 这次冷恢复模拟的是 CLI/Zellij 会话销毁后的重新启动，未执行 Windows 系统重启。
 Claude 的完整飞书链路、真实 AskUserQuestion 卡片往返，以及其它 CLI 的真实模型链路仍待验收。
