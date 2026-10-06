@@ -41,6 +41,14 @@ export function windowsChildPids(pid: number, rows = windowsProcesses()): number
   return rows.filter(p => p.parent === pid && p.created >= parent.created).map(p => p.pid);
 }
 
+/** A dead parent's PID may have been reused by a newer unrelated process. */
+export function windowsParentPid(pid: number, rows = windowsProcesses()): number | null {
+  const child = rows.find(p => p.pid === pid);
+  if (!child) return null;
+  const parent = rows.find(p => p.pid === child.parent);
+  return parent && parent.created <= child.created ? parent.pid : null;
+}
+
 /** Windows command-line quoting, without invoking cmd or expanding %variables%. */
 export function splitWindowsCommandLine(command: string): string[] {
   const args: string[] = [];

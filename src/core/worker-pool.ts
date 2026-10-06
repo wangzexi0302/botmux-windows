@@ -1705,6 +1705,9 @@ export function ensureOrdinaryTurnRecoveryAttached(
     cancel: timer => clearTimeout(timer),
     persist: () => sessionStore.updateSession(ds.session),
     mintContinuationTurnId: logicalTurnId => mintScheduledContinuationTurnId(logicalTurnId),
+    prepare: dispatch => parseScheduledTurnId(dispatch.logicalTurnId)
+      ? callbacks?.prepareRawInputTurn?.(ds, dispatch.turnId)
+      : undefined,
     enqueue: (dispatch: OrdinaryTurnRecoveryDispatch) => {
       if (!ordinaryTurnRecoveryEligible(ds) || !ordinaryTurnRecoveryStillOwnsSession(ds)) return false;
       // A scheduled logical turn continues as the same scheduled turn: same
@@ -4906,6 +4909,8 @@ export function ensureClaudeFolderTrust(workingDir: string, stateJsonPath: strin
     const configPath = stateJsonPath;
     let canonical: string;
     try { canonical = realpathSync(workingDir); } catch { canonical = workingDir; }
+    // Native Claude uses forward slashes for Windows project trust keys.
+    if (process.platform === 'win32') canonical = canonical.replace(/\\/g, '/');
 
     let data: any = {};
     if (existsSync(configPath)) {
