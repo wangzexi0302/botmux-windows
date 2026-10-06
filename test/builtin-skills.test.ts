@@ -17,7 +17,8 @@ describe('built-in botmux-send skill', () => {
     const skill = BUILTIN_SKILLS.find(s => s.name === 'botmux-send');
     expect(skill).toBeDefined();
     expect(skill!.content).toContain("botmux send <<'EOF'");
-    expect(skill!.content).toContain('Windows/PowerShell');
+    expect(skill!.content).toContain('在 PowerShell 里');
+    expect(skill!.content).toContain('Git for Windows Bash 支持 UTF-8 quoted heredoc / stdin');
     expect(skill!.content).toContain('--content-file');
     expect(skill!.content).toContain('Set-Content -LiteralPath $msg -Encoding utf8');
     expect(skill!.content).toContain('不要把中文直接通过 here-string');

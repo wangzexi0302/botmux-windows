@@ -54,7 +54,9 @@ describe('claude buildArgs — per-bot settingsEnv promotion', () => {
     for (const a of args) expect(a).not.toContain('sk-test-should-not-appear-in-argv');
 
     expect(existsSync(file)).toBe(true);
-    expect(statSync(file).mode & 0o777).toBe(0o600);
+    // Windows chmod exposes DOS read/write bits, not a POSIX owner-only mode.
+    // Access is controlled by the private config directory's inherited ACL.
+    if (process.platform !== 'win32') expect(statSync(file).mode & 0o777).toBe(0o600);
     const written = JSON.parse(readFileSync(file, 'utf-8'));
     expect(written.env).toEqual(SECRET_ENV);
     // bypass 键与 env 同文件共存

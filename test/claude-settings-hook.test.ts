@@ -77,6 +77,29 @@ describe('claude-code —— hook 注入策略（adopt 兼容 + SessionStart 真
     expect(adapter.hookInstall?.sessionStartCommand).toContain('session-ready');
   });
 
+  it.each(['win32', 'linux', 'darwin'] as const)('%s 普通权限启动保持会话身份且不跳过工具审批', (platform) => {
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    try {
+      Object.defineProperty(process, 'platform', { ...descriptor, value: platform });
+      const args = adapter.buildArgs({ sessionId: 'stable-session', resume: false, disableCliBypass: true });
+      expect(args.slice(0, 2)).toEqual(['--session-id', 'stable-session']);
+      expect(args).not.toContain('--dangerously-skip-permissions');
+      expect(settingsOf(args).permissions).toBeUndefined();
+      if (platform === 'win32') {
+        const index = args.indexOf('--permission-mode');
+        expect(index).toBeGreaterThanOrEqual(0);
+        expect(args[index + 1]).toBe('default');
+        const bypass = adapter.buildArgs({ sessionId: 'bypass-session', resume: false });
+        expect(bypass).toContain('--dangerously-skip-permissions');
+        expect(bypass).not.toContain('--permission-mode');
+      } else {
+        expect(args).not.toContain('--permission-mode');
+      }
+    } finally {
+      Object.defineProperty(process, 'platform', descriptor);
+    }
+  });
+
   it('--settings 恒带 statusLine → `botmux statusline`，refreshInterval=60', () => {
     const parsed = settingsOf(adapter.buildArgs({ sessionId: 's', resume: false }));
     expect(parsed.statusLine).toMatchObject({ type: 'command', refreshInterval: 60 });
