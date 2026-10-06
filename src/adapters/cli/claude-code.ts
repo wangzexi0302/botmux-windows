@@ -1127,6 +1127,11 @@ export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, rawBin: 
       }
       if (!disableCliBypass) {
         args.push('--dangerously-skip-permissions');
+      } else if (process.platform === 'win32' && variant.id === 'claude-code') {
+        // Claude 2.1.291's first-run mode picker can consume the held IM
+        // prompt, then re-exec without --session-id. Select ordinary per-tool
+        // approval explicitly; PermissionRequest hooks still ask the owner.
+        args.push('--permission-mode', 'default');
       }
       // 进程级 --settings JSON：作用域仅限本次 spawn，与用户自有 settings.json 合并
       // （Claude 把多个 settings 源按事件 **合并** hooks 数组，不互相覆盖）。这里只承载

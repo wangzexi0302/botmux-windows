@@ -14,8 +14,8 @@ Codex / Claude Code 共用的启动处理。Windows 默认使用 PTY，Linux/mac
 和 shell 特殊字符被改写。自定义 `.bat` / `.cmd`、PowerShell 脚本启动器暂不支持；
 可通过 `cliPathOverride` 指向原生可执行文件。
 
-这是开发中的原生适配。已验证 **飞书私聊 → 原生 Codex CLI → 飞书文字回复**；
-Claude Code 的飞书完整链路仍待验证。版本 smoke 不调用模型；输入 smoke 只检查
+这是开发中的原生适配。已验证 **飞书私聊 → 原生 Codex CLI → 飞书文字回复**，以及
+**飞书话题 → 原生 Zellij / Claude Code → DeepSeek → 飞书回复和问答卡片**。版本 smoke 不调用模型；输入 smoke 只检查
 真实 Codex 输入框，不提交 prompt。
 2026-10-06 已改用 DeepSeek 的 Anthropic 兼容接口完成真实 Claude 模型调用、PTY/Zellij 输入和会话恢复验收。
 已加入原生 Zellij 托管会话后端与 `/adopt`，详见下节。CLI hooks 与 Codex 会话恢复已验证；
@@ -148,7 +148,38 @@ Windows CI 是上述已支持路径的阻塞验证；Linux CI 继续执行全部
 10 个本轮上游定时委托、端口探测、头像及恢复相关文件为 127 项通过。
 
 这次冷恢复模拟的是 CLI/Zellij 会话销毁后的重新启动，未执行 Windows 系统重启。
-Claude 的完整飞书链路、真实 AskUserQuestion 卡片往返，以及其它 CLI 的真实模型链路仍待验收。
+本节 CLI 验收之后又完成了下面的真实飞书验收；其它 CLI 的真实模型链路仍待验收。
+
+## 2026-10-06 Claude 飞书话题验收
+
+使用上述 Claude Code 2.1.291、`deepseek-flash`、原生 Zellij 0.45.1，以及 Node 24.16.0
+运行 Botmux，在隔离的中文/空格/emoji 工作目录中，通过飞书客户端完成：
+
+- 新建话题后发送中文、多行、弯引号、破折号、箭头和 emoji，Claude 原生 JSONL 的
+  用户正文逐字匹配；模型通过 Git for Windows Bash 的 UTF-8 stdin 回传两行原文。
+- 模型实际调用原生 `AskUserQuestion`，飞书选择按钮的结果进入 Claude 的工具结果，
+  模型准确回传选中的分支；真实 Bash `PermissionRequest` 卡片允许执行后继续回复。
+- 保留一个待处理工具授权卡片时重启 Botmux：broker 恢复待回答请求，Zellij 保留
+  同一 Claude PID；在原卡片上回答后模型继续发送飞书回复。
+- 在话题中执行 `/restart`：旧 Claude PID 退出，新 PID 以 `--resume` 恢复同一
+  CLI 会话；不在追问中提供答案，模型仍准确回传初始口令和上次卡片选择。
+- 通过话题 `/close` 结束测试会话并清理原生 CLI/Zellij，恢复测试前的机器人配置。
+
+首次实测发现普通权限启动会停在 Claude 的权限模式选择页：首条 IM 提示被该页消费，
+CLI 重新执行后还会丢失显式会话 ID。Windows Claude Code 的 `disableCliBypass: true`
+启动现在明确传入 `--permission-mode default`，继续逐次询问工具授权；POSIX、其它
+Claude 衍生 CLI 及启用 bypass 的行为保持原有逻辑。
+
+Windows 消息提示与内置发送 skill 也按实际 shell 说明：PowerShell 用 UTF-8 文件，
+Git for Windows Bash 可直接使用 UTF-8 quoted heredoc/stdin，避免要求 Bash 工具
+拼接容易展开美元变量和反引号的 PowerShell 命令。
+
+完整构建通过；本轮 8 个 Claude 启动/隔离、CLI 适配器、Windows 启动/输入及发送
+提示/skill 测试文件共 **554 项通过、4 项平台限定跳过**。启动 settings 的凭证隔离
+检查在 Windows 继续执行；POSIX 的 `0600` 权限位断言仅在支持该权限模型的平台执行。
+
+本次验证的是原生 Zellij 中的完整飞书话题链路。直接 PTY 的真实 Claude 输入和恢复
+仍以上一节 CLI 验收为准；未执行 Windows 系统重启，也未据此宣称全套 Windows 功能均已验收。
 
 ## 本地构建和验证
 
@@ -182,7 +213,8 @@ node-pty 会在输出前提前退出，该运行时下仅跳过此 PTY 用例，
 ConPTY 输入为 BMP Unicode 字符发送显式 Win32 Unicode 按键，保留中文弯引号、
 破折号与箭头；连续字符发送按下/抬起事件，emoji 保留完整代理对。避免 native
 Codex 丢弃部分字符后，历史记录与原消息不一致而触发 `submit_unconfirmed`。
-Windows 会话提示使用 PowerShell 与 `botmux.cmd`，多行正文写 UTF-8 文件后发送。
+Windows 会话提示按实际 shell 选择发送方式：PowerShell 使用 `botmux.cmd` 和 UTF-8
+正文文件，Git for Windows Bash 使用 `botmux` 和 UTF-8 quoted heredoc/stdin。
 Codex 标题读取/同步同样解析 npm 启动器；关闭辅助进程时等待 Windows 释放管道与
 工作目录句柄，再清理临时目录。
 

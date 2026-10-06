@@ -12,6 +12,10 @@ describe('platform shell routing for both CLI prompt styles', () => {
           expect(prompt).toContain('PowerShell');
           expect(prompt).toContain('botmux.cmd send --no-mention --content-file $replyFile');
           expect(prompt).toContain('[Text.UTF8Encoding]::new($false)');
+          expect(prompt).toContain('Git for Windows Bash');
+          expect(prompt).toContain('quoted heredoc/stdin');
+          expect(prompt).not.toContain('Do not use Bash heredocs');
+          expect(prompt).not.toContain('不要使用 Bash heredoc');
           expect(prompt).not.toContain('```bash');
         } else {
           expect(prompt).toContain("botmux send <<'EOF'");
