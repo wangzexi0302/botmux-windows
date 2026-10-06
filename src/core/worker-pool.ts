@@ -4906,6 +4906,8 @@ export function ensureClaudeFolderTrust(workingDir: string, stateJsonPath: strin
     const configPath = stateJsonPath;
     let canonical: string;
     try { canonical = realpathSync(workingDir); } catch { canonical = workingDir; }
+    // Native Claude uses forward slashes for Windows project trust keys.
+    if (process.platform === 'win32') canonical = canonical.replace(/\\/g, '/');
 
     let data: any = {};
     if (existsSync(configPath)) {

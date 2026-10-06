@@ -2006,6 +2006,7 @@ function seedAndTrustClaudeState(statePath: string, workingDir: string, log: (m:
     data.hasCompletedOnboarding = true;
     let canonical = workingDir;
     try { canonical = realpathSync(workingDir); } catch { /* cwd may not exist yet */ }
+    if (process.platform === 'win32') canonical = canonical.replace(/\\/g, '/');
     const entry = data.projects[canonical] && typeof data.projects[canonical] === 'object'
       ? data.projects[canonical]
       : (data.projects[canonical] = {});

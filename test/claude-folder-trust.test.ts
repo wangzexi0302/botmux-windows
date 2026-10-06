@@ -12,27 +12,23 @@ import { ensureClaudeFolderTrust } from '../src/core/worker-pool.js';
 describe('ensureClaudeFolderTrust', () => {
   let home: string;
   let workDir: string;
-  let prevHome: string | undefined;
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'bmx-trust-home-'));
     workDir = mkdtempSync(join(tmpdir(), 'bmx-trust-work-'));
-    prevHome = process.env.HOME;
-    process.env.HOME = home;
   });
 
   afterEach(() => {
-    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
     rmSync(home, { recursive: true, force: true });
     rmSync(workDir, { recursive: true, force: true });
   });
 
   const configPath = () => join(home, '.claude.json');
-  const canonical = () => realpathSync(workDir);
+  const canonical = () => process.platform === 'win32' ? realpathSync(workDir).replace(/\\/g, '/') : realpathSync(workDir);
 
   it('creates ~/.claude.json and marks the workingDir trusted (keyed by realpath)', () => {
     expect(existsSync(configPath())).toBe(false);
-    ensureClaudeFolderTrust(workDir);
+    ensureClaudeFolderTrust(workDir, configPath());
     const data = JSON.parse(readFileSync(configPath(), 'utf-8'));
     expect(data.projects[canonical()].hasTrustDialogAccepted).toBe(true);
   });
@@ -42,7 +38,7 @@ describe('ensureClaudeFolderTrust', () => {
       numStartups: 7,
       projects: { '/some/other/dir': { hasTrustDialogAccepted: true, lastCost: 1.5 } },
     }, null, 2));
-    ensureClaudeFolderTrust(workDir);
+    ensureClaudeFolderTrust(workDir, configPath());
     const data = JSON.parse(readFileSync(configPath(), 'utf-8'));
     expect(data.numStartups).toBe(7);
     expect(data.projects['/some/other/dir']).toEqual({ hasTrustDialogAccepted: true, lastCost: 1.5 });
@@ -53,7 +49,7 @@ describe('ensureClaudeFolderTrust', () => {
     writeFileSync(configPath(), JSON.stringify({
       projects: { [canonical()]: { lastCost: 2.5, allowedTools: ['Bash'] } },
     }, null, 2));
-    ensureClaudeFolderTrust(workDir);
+    ensureClaudeFolderTrust(workDir, configPath());
     const entry = JSON.parse(readFileSync(configPath(), 'utf-8')).projects[canonical()];
     expect(entry.hasTrustDialogAccepted).toBe(true);
     expect(entry.lastCost).toBe(2.5);
@@ -61,16 +57,26 @@ describe('ensureClaudeFolderTrust', () => {
   });
 
   it('is idempotent and does not rewrite when already trusted', () => {
-    ensureClaudeFolderTrust(workDir);
+    ensureClaudeFolderTrust(workDir, configPath());
     const firstMtime = readFileSync(configPath(), 'utf-8');
-    ensureClaudeFolderTrust(workDir);
+    ensureClaudeFolderTrust(workDir, configPath());
     expect(readFileSync(configPath(), 'utf-8')).toBe(firstMtime);
   });
 
   it('swallows malformed JSON without throwing', () => {
     writeFileSync(configPath(), '{ not valid json');
-    expect(() => ensureClaudeFolderTrust(workDir)).not.toThrow();
+    expect(() => ensureClaudeFolderTrust(workDir, configPath())).not.toThrow();
     // Left the corrupt file untouched (best-effort: never destroys user data).
     expect(readFileSync(configPath(), 'utf-8')).toBe('{ not valid json');
+  });
+
+  it.runIf(process.platform === 'win32')('uses Claude native Windows forward-slash project keys while preserving existing entries', () => {
+    const oldKey = realpathSync(workDir);
+    writeFileSync(configPath(), JSON.stringify({ projects: { [oldKey]: { lastCost: 3, hasTrustDialogAccepted: true } } }));
+    ensureClaudeFolderTrust(workDir, configPath());
+    const data = JSON.parse(readFileSync(configPath(), 'utf8'));
+    expect(canonical()).toContain(':/');
+    expect(data.projects[canonical()].hasTrustDialogAccepted).toBe(true);
+    expect(data.projects[oldKey]).toEqual({ lastCost: 3, hasTrustDialogAccepted: true });
   });
 });

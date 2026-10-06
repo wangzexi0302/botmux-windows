@@ -17,7 +17,7 @@ Codex / Claude Code 共用的启动处理。Windows 默认使用 PTY，Linux/mac
 这是开发中的原生适配。已验证 **飞书私聊 → 原生 Codex CLI → 飞书文字回复**；
 Claude Code 的飞书完整链路仍待验证。版本 smoke 不调用模型；输入 smoke 只检查
 真实 Codex 输入框，不提交 prompt。
-2026-10-06 Claude 服务仍返回 HTTP 503，可用分组的模型列表为空；按用户要求暂缓真实 Claude 验收。
+2026-10-06 已改用 DeepSeek 的 Anthropic 兼容接口完成真实 Claude 模型调用、PTY/Zellij 输入和会话恢复验收。
 已加入原生 Zellij 托管会话后端与 `/adopt`，详见下节。CLI hooks 与 Codex 会话恢复已验证；
 全部上游功能及其它 CLI 的真实恢复仍未完成 Windows 验收。直接 PTY 会话不跨 daemon 重启存活；tmux /adopt、Unix 文件沙盒、
 Windows 单文件发行包和 Electron 安装包均不在本阶段支持范围。
@@ -99,7 +99,7 @@ Windows CI 下载带固定 SHA-256 的 Zellij 0.45.1，执行生命周期和多 
 Zellij **0.45.1 原生 Windows 手动重命名会话暂不支持**：本机复现官方 `action rename-session`
 后，新名称的 `action list-panes` 无法连接。Botmux 对这类名称变化拒绝猜测进程，避免接管错误会话。
 Codex 冷恢复已模拟终止旧 Zellij server 后重新创建进程，恢复同一 CLI 会话和历史；未执行真实系统重启。
-Zellij 内完整 Claude 模型调用按用户要求暂缓。
+Zellij 内真实 Claude 模型调用和冷恢复已验证，详见后面的 DeepSeek 验收记录。
 
 ## 2026-10-06 接管、hooks 与恢复验证
 
@@ -123,6 +123,26 @@ Windows 日志持久化以可写句柄执行文件 flush，继续传播真实 I/
 29 个涉及 flush 的文件重测为 390 项通过、69 项失败、3 项跳过，剩余涉及 POSIX 权限、路径和其它工作流行为。
 全套仍包含 Unix shell/IPC、符号链接权限、HOME/POSIX 路径以及未移植的上游功能，**全套 Windows 单测尚未全绿**。
 Windows CI 是上述已支持路径的阻塞验证；Linux CI 继续执行全部上游单测。
+
+## 2026-10-06 Claude / DeepSeek 真实验收
+
+使用原生 Claude Code **2.1.291**、DeepSeek Anthropic 兼容接口和该账户模型列表中的
+`deepseek-flash`，在独立配置目录及包含中文、空格和 emoji 的工作目录中验证：
+
+- Anthropic Messages 接口真实调用、Claude 两轮对话及 `--resume` 后的对话记忆。
+- 直接 PTY 和原生 Zellij 的中文标点、连续 emoji、shell 字符及多行输入；模型实际回复，
+  并逐字核对 Claude JSONL 中的用户正文。
+- 真实 Claude pane 的接管与 PID/pane 校验，接管后输入框内容跨同 PID 重连保持。
+- 销毁旧 Zellij 会话后以新 PID 恢复同一 Claude 会话，再次调用模型并确认保留先前对话记忆。
+- Claude 实际触发 SessionStart、UserPromptSubmit 和 Stop hooks；Botmux 的
+  `session-ready` / `user-prompt-hook` 命令正常退出。测试未向飞书发送消息或执行真实 AskUserQuestion 往返。
+
+验收发现并修复两处原生 Windows 问题：Claude 使用正斜杠的项目信任键，托管及隔离
+配置目录均按此写入，避免首次启动停在信任页；接管 hook 的祖先进程查询使用一次原生
+进程快照，校验父子创建时间，拒绝已复用的父 PID。Linux/macOS 的祖先查询及信任路径保持原有行为。
+
+这次冷恢复模拟的是 CLI/Zellij 会话销毁后的重新启动，未执行 Windows 系统重启。
+Claude 的完整飞书链路、真实 AskUserQuestion 卡片往返，以及其它 CLI 的真实模型链路仍待验收。
 
 ## 本地构建和验证
 

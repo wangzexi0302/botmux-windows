@@ -20,7 +20,8 @@ import {
   __testOnly_getChildPids,
   readCmdline, readProcessStartTime,
 } from '../src/core/session-discovery.js';
-import { windowsProcessContext, windowsChildPids, splitWindowsCommandLine, type WindowsProcessInfo } from '../src/utils/windows-process.js';
+import { windowsProcessContext, windowsChildPids, windowsParentPid, splitWindowsCommandLine, type WindowsProcessInfo } from '../src/utils/windows-process.js';
+import { getAncestorPids } from '../src/adapters/adopt-route.js';
 
 let child: ChildProcessWithoutNullStreams;
 let childCwd: string;
@@ -84,7 +85,20 @@ describe('native process identity', () => {
     ];
     expect(windowsChildPids(100, rows)).toEqual([102, 103]);
     expect(windowsChildPids(99, rows)).toEqual([]);
+    expect(windowsParentPid(101, rows)).toBeNull();
+    expect(windowsParentPid(102, rows)).toBe(100);
+    expect(windowsParentPid(103, rows)).toBe(100);
+    expect(windowsParentPid(100, rows)).toBeNull();
+    expect(windowsParentPid(99, rows)).toBeNull();
   });
+  it('resolves the real hook ancestor chain without a Unix ps dependency on Windows', async () => {
+    const ancestors = await probe(() => {
+      const values = getAncestorPids(child.pid!);
+      return values.length ? values : undefined;
+    });
+    expect(ancestors?.[0]).toBe(process.pid);
+    expect(getAncestorPids(child.pid!, undefined, 1)).toEqual([process.pid]);
+  }, 60_000);
   it('reads the command line and process birth time', async () => {
     const argv = await probe(() => { const a = readCmdline(child.pid!); return a.length ? a : undefined; });
     expect(argv?.join(' ')).toContain('引号“” 😀 a&b');

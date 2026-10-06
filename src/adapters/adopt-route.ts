@@ -13,6 +13,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fetchDaemonIpc } from '../core/daemon-ipc-auth.js';
+import { windowsParentPid, windowsProcesses } from '../utils/windows-process.js';
 
 // ── 类型 ───────────────────────────────────────────────────────────────────────
 
@@ -72,7 +73,7 @@ function defaultReadParent(pid: number): number | null {
  * 沿进程祖先链向上收集 PID（不含 startPid 自己）。
  *
  * @param startPid    起始进程 PID（自身不包含在结果中）
- * @param readParent  注入式父 PID 读取函数（默认使用 /proc 或 ps）
+ * @param readParent  注入式父 PID 读取函数（Windows 使用一次进程快照，其它平台使用 /proc 或 ps）
  * @param maxDepth    最大深度，防止意外无限循环（默认 40）
  * @returns           祖先 PID 数组，从最近父进程到最远祖先
  */
@@ -81,7 +82,11 @@ export function getAncestorPids(
   readParent?: (pid: number) => number | null,
   maxDepth?: number,
 ): number[] {
-  const reader = readParent ?? defaultReadParent;
+  // Use one consistent snapshot for the entire Windows chain. In addition to
+  // avoiding a PowerShell launch per ancestor, birth ordering rejects reused
+  // parent PIDs before an adopted hook can be routed to another session.
+  const rows = !readParent && process.platform === 'win32' ? windowsProcesses(true) : undefined;
+  const reader = readParent ?? (rows ? (pid: number) => windowsParentPid(pid, rows) : defaultReadParent);
   const depth = maxDepth ?? 40;
   const ancestors: number[] = [];
   const visited = new Set<number>([startPid]);
