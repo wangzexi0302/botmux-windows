@@ -7,7 +7,7 @@
 import { execFileSync, execSync } from 'node:child_process';
 import { readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, win32 } from 'node:path';
 import type { CliId } from '../adapters/cli/types.js';
 import { executableBasename } from '../adapters/cli/runtime.js';
 import { findCodexRolloutByPid } from '../services/codex-transcript.js';
@@ -15,9 +15,12 @@ import { findCocoSessionByPid } from '../services/coco-transcript.js';
 import { findTraexRolloutByPid } from '../services/traex-transcript.js';
 import { tmuxEnv } from '../setup/ensure-tmux.js';
 import { herdrExecutable } from '../utils/herdr-executable.js';
+import { windowsProcesses, windowsChildPids, windowsProcessCwd, splitWindowsCommandLine } from '../utils/windows-process.js';
+import { resolveExecutableLaunch } from '../utils/pty-launch.js';
 
 // macOS 没有 /proc，所以走 ps/lsof/pgrep 兜底。Linux 仍优先走 /proc 快路径。
 const IS_LINUX = platform() === 'linux';
+const IS_WINDOWS = platform() === 'win32';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -88,8 +91,13 @@ const CLI_COMM_MAP: Record<string, CliId> = {
  *  while argv[0] is `/.../cursor-agent` or `/.../agent`. */
 const COMM_ARGV_LAUNCHERS = new Set([
   'node', 'node.exe', 'nodejs', 'bun', 'deno', 'python', 'python2', 'python3', 'ruby', 'npx', 'tsx',
-  'MainThread',
+  'MainThread', 'mainthread',
 ]);
+
+function normalizeProcessComm(comm: string): string {
+  const name = comm.startsWith('.') ? comm.slice(1) : comm;
+  return IS_WINDOWS ? executableBasename(name).replace(/\.(?:exe|com)$/i, '').toLowerCase() : name;
+}
 
 /** Interactive-shell comms. When a pane's leaf process is one of these AFTER
  *  botmux is ready to type the first prompt, the CLI never actually launched —
@@ -223,7 +231,7 @@ export function processExecutableArgvSlots(
   comm: string | undefined,
   argv: string[],
 ): string[] {
-  const normalizedComm = comm?.startsWith('.') ? comm.slice(1) : comm;
+  const normalizedComm = comm ? normalizeProcessComm(comm) : undefined;
   return normalizedComm && COMM_ARGV_LAUNCHERS.has(normalizedComm)
     ? launcherExecutableSlots(argv)
     : argv.slice(0, 1);
@@ -234,14 +242,14 @@ export function cliIdForComm(
   filterCliId?: CliId,
   filterExecutable?: string,
 ): CliId | undefined {
-  const normalizedComm = comm.startsWith('.') ? comm.slice(1) : comm;
+  const normalizedComm = normalizeProcessComm(comm);
   const customCodexName = customCodexExecutableName(filterCliId, filterExecutable);
   if (customCodexName !== undefined) {
     // `node`, `python`, etc. are launchers, not proof that every process using
     // that interpreter is the configured Codex-compatible runtime. Their script
     // identity is checked from constrained argv slots below.
     if (COMM_ARGV_LAUNCHERS.has(normalizedComm)) return undefined;
-    return normalizedComm === customCodexName ? 'codex' : undefined;
+    return normalizedComm === (IS_WINDOWS ? normalizeProcessComm(customCodexName) : customCodexName) ? 'codex' : undefined;
   }
   const direct = CLI_COMM_MAP[comm] ?? CLI_COMM_MAP[normalizedComm];
   // Cursor's agent binary may be installed as the generic name `agent`. Only
@@ -257,6 +265,10 @@ export function cliIdForComm(
 
 /** /proc/<pid>/cmdline → argv (Linux fast path; ps fallback for macOS). */
 export function readCmdline(pid: number): string[] {
+  if (IS_WINDOWS) {
+    const command = windowsProcesses().find(p => p.pid === pid)?.command;
+    return command ? splitWindowsCommandLine(command) : [];
+  }
   try {
     return readFileSync(`/proc/${pid}/cmdline`, 'utf-8').split('\0').filter(Boolean);
   } catch {
@@ -278,9 +290,21 @@ export function cliIdFromCommArgv(
   filterExecutable?: string,
 ): CliId | undefined {
   if (!comm) return undefined;
-  const normalizedComm = comm.startsWith('.') ? comm.slice(1) : comm;
+  const normalizedComm = normalizeProcessComm(comm);
   const customCodexName = customCodexExecutableName(filterCliId, filterExecutable);
   let detected = cliIdForComm(comm, filterCliId, filterExecutable);
+  if (IS_WINDOWS && customCodexName !== undefined && /\.(?:cmd|bat)$/i.test(filterExecutable!)) {
+    // npm's launcher becomes Node + one specific JS entry. Its basename alone
+    // cannot distinguish two installed distributions or an unrelated prompt.
+    try {
+      const launch = resolveExecutableLaunch(filterExecutable!, [], process.env);
+      const samePath = (a: string, b: string) => win32.isAbsolute(a) && win32.isAbsolute(b)
+        && win32.normalize(a).toLowerCase() === win32.normalize(b).toLowerCase();
+      detected = normalizedComm === 'node' && samePath(argv[0] ?? '', launch.bin)
+        && processExecutableArgvSlots(comm, argv).some(arg => samePath(arg, launch.args[0] ?? '')) ? 'codex' : undefined;
+    } catch { detected = undefined; }
+    return detected;
+  }
   if (!detected && customCodexName !== undefined) {
     // Native processes expose the executable as argv[0]. Generic launchers
     // (node/npx/python/...) may instead carry it deeper in argv. Never scan all
@@ -290,10 +314,11 @@ export function cliIdFromCommArgv(
     if (candidates.some(arg => !arg.startsWith('-') && executableBasename(arg) === customCodexName)) {
       detected = 'codex';
     }
-  } else if (!detected && COMM_ARGV_LAUNCHERS.has(comm)) {
-    for (const arg of argv) {
+  } else if (!detected && COMM_ARGV_LAUNCHERS.has(normalizedComm)) {
+    for (const arg of IS_WINDOWS ? processExecutableArgvSlots(normalizedComm, argv) : argv) {
       if (arg.startsWith('-')) continue;
-      const id = cliIdForComm(basename(arg), filterCliId);
+      const name = IS_WINDOWS ? executableBasename(arg).replace(/\.[cm]?js$/i, '') : basename(arg);
+      const id = cliIdForComm(name, filterCliId);
       if (id) { detected = id; break; }
     }
   }
@@ -319,6 +344,7 @@ function shellescape(s: string): string {
  * 返回 undefined 表示进程不存在或读不到。
  */
 export function readComm(pid: number): string | undefined {
+  if (IS_WINDOWS) return windowsProcesses().find(p => p.pid === pid)?.name;
   if (IS_LINUX) {
     try {
       return readFileSync(`/proc/${pid}/comm`, 'utf-8').trim();
@@ -351,6 +377,7 @@ export function readComm(pid: number): string | undefined {
  * 返回 undefined 表示读不到。
  */
 export function readCwd(pid: number): string | undefined {
+  if (IS_WINDOWS) return windowsProcessCwd(pid);
   if (IS_LINUX) {
     try {
       return readlinkSync(`/proc/${pid}/cwd`);
@@ -413,6 +440,7 @@ function clockTicksPerSecond(): number {
  * /proc/stat 的 btime；其它 Unix 走 `ps -o lstart=` 解析。读不到返回 undefined。
  */
 export function readProcessStartTime(pid: number): number | undefined {
+  if (IS_WINDOWS) return windowsProcesses().find(p => p.pid === pid)?.created;
   if (IS_LINUX) {
     try {
       const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8');
@@ -455,6 +483,7 @@ export function readProcessStartTime(pid: number): number | undefined {
  * 低频操作（只在用户 /adopt 时跑一遍）。
  */
 export function getChildPids(pid: number): number[] {
+  if (IS_WINDOWS) return windowsChildPids(pid);
   try {
     const out = execSync('ps -A -o pid= -o ppid=', {
       encoding: 'utf-8',

@@ -292,19 +292,39 @@ export function prepareHookPayload(hook: HookConfig, rawPayload: HookPayload): H
   return payload;
 }
 
-export function parseHookCommand(command: string): ParsedHookCommand {
+export function parseHookCommand(command: string, platform: NodeJS.Platform = process.platform): ParsedHookCommand {
   const tokens: string[] = [];
   let current = '';
   let quote: '"' | "'" | null = null;
   let escaping = false;
+  let started = false;
+  const input = command.trim();
 
-  for (const ch of command.trim()) {
+  for (let index = 0; index < input.length; index++) {
+    const ch = input[index]!;
     if (escaping) {
       current += ch;
       escaping = false;
       continue;
     }
     if (ch === '\\') {
+      started = true;
+      if (platform === 'win32') {
+        // Backslashes in Windows paths are literal. Only a run immediately
+        // before a double quote uses the Windows argv escape convention.
+        let count = 1;
+        while (input[index + count] === '\\') count++;
+        if (quote !== "'" && input[index + count] === '"') {
+          current += '\\'.repeat(Math.floor(count / 2));
+          if (count % 2) current += '"';
+          else quote = quote === '"' ? null : '"';
+          index += count;
+        } else {
+          current += '\\'.repeat(count);
+          index += count - 1;
+        }
+        continue;
+      }
       escaping = true;
       continue;
     }
@@ -314,23 +334,26 @@ export function parseHookCommand(command: string): ParsedHookCommand {
       continue;
     }
     if (ch === '"' || ch === "'") {
+      started = true;
       quote = ch;
       continue;
     }
     if (/\s/.test(ch)) {
-      if (current) {
+      if (started) {
         tokens.push(current);
         current = '';
+        started = false;
       }
       continue;
     }
     current += ch;
+    started = true;
   }
 
   if (escaping) current += '\\';
   if (quote) throw new Error('Unterminated quote in hook command');
-  if (current) tokens.push(current);
-  if (tokens.length === 0) throw new Error('Empty hook command');
+  if (started) tokens.push(current);
+  if (tokens.length === 0 || !tokens[0]) throw new Error('Empty hook command');
   const [file, ...args] = tokens;
   return { file, args };
 }
@@ -379,6 +402,7 @@ async function runHookCommand(
       stdio: ['pipe', options.captureStdout ? 'pipe' : 'ignore', 'pipe'],
       // detached so we can kill the whole process group (grandchildren included)
       detached: true,
+      windowsHide: true,
       env: {
         // Minimal allowlist — avoids leaking secrets (LARK_APP_SECRET, API keys, etc.)
         PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
@@ -391,6 +415,12 @@ async function runHookCommand(
         LOGNAME: process.env.LOGNAME,
         LANG: process.env.LANG,
         LC_ALL: process.env.LC_ALL,
+        ...(process.platform === 'win32' ? {
+          SystemRoot: process.env.SystemRoot,
+          SystemDrive: process.env.SystemDrive,
+          ComSpec: process.env.ComSpec,
+          USERPROFILE: process.env.USERPROFILE,
+        } : {}),
         ...options.extraEnv,
         BOTMUX_HOOK_EVENT: payload.event,
       },
@@ -413,7 +443,16 @@ async function runHookCommand(
     const timer = setTimeout(() => {
       timedOut = true;
       try {
-        if (child.pid !== undefined) {
+        if (process.platform === 'win32' && child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+          // Win32 has no POSIX process groups. Kill the still-owned child tree
+          // before its root exits, otherwise detached grandchildren survive.
+          const killer = spawn(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'], {
+            windowsHide: true, shell: false, stdio: 'ignore',
+          });
+          killer.on('error', () => { try { child.kill(); } catch { /* gone */ } });
+          killer.on('exit', code => { if (code) { try { child.kill(); } catch { /* gone */ } } });
+          killer.unref();
+        } else if (child.pid !== undefined) {
           try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
           setTimeout(() => {
             if (!settled && child.pid !== undefined) {

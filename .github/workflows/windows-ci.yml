@@ -51,11 +51,13 @@ jobs:
       - name: Verify upstream sync against disposable Git repositories
         run: node --test test/sync-upstream.test.mjs
       - name: Verify supervisor lifecycle and native Windows control
-        run: bun run test -- test/windows-supervisor-control.test.ts test/fleet-supervisor.integration.test.ts test/index-supervisor-env-boundary.test.ts test/fleet-command-queue.test.ts test/fleet-runtime.test.ts test/fleet-runtime-spawn-env.test.ts test/fleet-process-identity.test.ts
+        run: bun run test -- test/windows-supervisor-control.test.ts test/fleet-supervisor.integration.test.ts test/index-supervisor-env-boundary.test.ts test/fleet-command-queue.test.ts test/fleet-runtime.test.ts test/fleet-runtime-spawn-env.test.ts test/fleet-process-identity.test.ts --maxWorkers=2
       - name: Verify Codex title helper process lifecycle
         run: bun run test -- test/codex-app-threads.test.ts
       - name: Verify Zellij platform boundaries and existing session behavior
         run: bun run test -- test/windows-zellij.test.ts test/zellij-backend-helpers.test.ts test/zellij-frozen-reattach.test.ts test/zellij-observe-backend.test.ts test/zellij-session-discovery.test.ts
+      - name: Verify native process discovery, hooks and session recovery
+        run: bun run test -- test/session-discovery.test.ts test/session-discovery.smoke.test.ts test/zellij-cli-detection.test.ts test/hook-command.test.ts test/hook-installer.test.ts test/hook-runner.test.ts test/hook-runner-cache.test.ts test/session-resume.test.ts test/restore-zombie-close.test.ts test/resume-fresh-policy.test.ts test/v3-portable-resume-integrity.test.ts test/fs-durability.test.ts test/fs-durability-errors.test.ts --maxWorkers=2
       - name: Install pinned native Zellij for lifecycle smoke
         if: runner.os == 'Windows'
         shell: pwsh
@@ -73,3 +75,6 @@ jobs:
       - name: Verify strict native Zellij environment and persistence
         if: runner.os == 'Windows'
         run: node scripts/smoke-windows-zellij.mjs --strict
+      - name: Verify native Zellij multi-pane adopt and input isolation
+        if: runner.os == 'Windows'
+        run: node scripts/smoke-windows-zellij-adopt.mjs

@@ -29,6 +29,7 @@ import {
 import { zellijEnv } from '../setup/ensure-zellij.js';
 import { logger } from '../utils/logger.js';
 import { execFileSync } from 'node:child_process';
+import { windowsProcesses, windowsProcessContext } from '../utils/windows-process.js';
 
 export { cliIdFromCommArgv } from './session-discovery.js';
 
@@ -76,7 +77,7 @@ function findAllClisUnder(
     const next: number[] = [];
     for (const pid of current) {
       const cliId = cliIdForProc(pid, filterCliId, filterExecutable);
-      if (cliId) found.push({ pid, cliId, cwd: canonPath(readCwd(pid)) });
+      if (cliId) found.push({ pid, cliId, cwd: process.platform === 'win32' ? undefined : canonPath(readCwd(pid)) });
       for (const ch of getChildPids(pid)) { parentOf.set(ch, pid); next.push(ch); }
     }
     current = next;
@@ -197,6 +198,19 @@ function resolveSessionId(cliId: CliId, pid: number): { sessionId?: string; star
   return {};
 }
 
+/** Windows PIDs are reused out of creation order. Bind by Zellij's inherited
+ * pane identifier, and verify the inspected process has the CIM birth time.
+ * Missing/duplicate identifiers are refused rather than guessed by position. */
+function windowsPaneClis(serverPid: number, filterCliId?: CliId, filterExecutable?: string) {
+  const rows = windowsProcesses(true);
+  return findAllClisUnder(serverPid, 6, filterCliId, filterExecutable).flatMap(cli => {
+    const context = windowsProcessContext(cli.pid);
+    const row = rows.find(p => p.pid === cli.pid);
+    if (!context?.paneId || !row || row.created !== context.created) return [];
+    return [{ ...cli, cwd: context.cwd, paneId: context.paneId, startedAt: context.created }];
+  });
+}
+
 /**
  * Scan all live zellij sessions for adoptable CLIs. Skips bmx-* (botmux's own).
  * @param filterCliId only return sessions matching this CLI type.
@@ -218,6 +232,22 @@ export function discoverAdoptableZellijSessions(
 
     const serverPid = findServerPid(session);
     if (!serverPid) continue;
+
+    if (process.platform === 'win32') {
+      const clis = windowsPaneClis(serverPid, filterCliId, filterExecutable);
+      for (const pane of terminals) {
+        const matches = clis.filter(cli => cli.paneId === pane.paneId);
+        if (matches.length !== 1) continue;
+        const cli = matches[0]!;
+        const dims = paneDimensions(session, pane.paneId);
+        if (!dims) continue;
+        const { sessionId } = resolveSessionId(cli.cliId, cli.pid);
+        results.push({ zellijSession: session, zellijPaneId: pane.paneId,
+          cliPid: cli.pid, cliId: cli.cliId, sessionId, cwd: cli.cwd,
+          startedAt: cli.startedAt, paneCols: dims.cols, paneRows: dims.rows });
+      }
+      continue;
+    }
 
     // Bind each pane to its OWN process subtree. The zellij server forks one
     // shell per terminal pane, so its direct children sorted by pid (= process
@@ -281,6 +311,10 @@ export function validateZellijAdoptTarget(
 ): boolean {
   const serverPid = findServerPid(session);
   if (!serverPid) return false;
+  if (process.platform === 'win32') {
+    const clis = windowsPaneClis(serverPid, filterCliId, filterExecutable).filter(c => c.paneId === paneId);
+    return clis.length === 1 && clis[0]!.pid === expectedPid && paneDimensions(session, paneId) !== undefined;
+  }
   const clis = findAllClisUnder(serverPid, 4, filterCliId, filterExecutable);
   if (!clis.some(c => c.pid === expectedPid)) return false;
   // And the pane must still exist.

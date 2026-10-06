@@ -66,15 +66,21 @@ export function readProcessStartIdentity(pid: number): string | undefined {
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        `$p = Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\"; `
-          + 'if ($p) { $p.CreationDate.ToUniversalTime().Ticks }',
+        "$ErrorActionPreference = 'Stop'; "
+          + `$p = [Diagnostics.Process]::GetProcessById(${pid}); `
+          + 'try { $t = $p.StartTime.ToUniversalTime().Ticks; $t - ($t % 10) } '
+          + 'finally { $p.Dispose() }',
       ], {
         encoding: 'utf-8',
         timeout: WINDOWS_PROCESS_QUERY_TIMEOUT_MS,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'ignore'],
       }).trim();
-      return started || undefined;
+      // CIM's persisted CreationDate has microsecond precision. Keep that
+      // identity format while querying GetProcessTimes through Process.StartTime
+      // instead of paying for WMI startup on each ownership check. Integer
+      // remainder/subtraction avoids losing precision in floating-point division.
+      return /^\d+$/.test(started) ? started : undefined;
     } catch {
       return undefined;
     }

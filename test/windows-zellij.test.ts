@@ -117,10 +117,14 @@ describe.skipIf(process.platform !== 'win32')('Windows Zellij', () => {
     vi.stubEnv('ZELLIJ_SOCKET_DIR', dir);
     const serverMarker = pathAlias ? toNamespacedPath(marker) : marker;
     const server = { pid: 1234, parent: 1, name: 'zellij.exe', command: `zellij.exe --server "${serverMarker}"`, created: Date.now() - 5000 };
-    const runner = { pid: 1235, parent: 1234, name: 'node.exe', command: 'node -e "/* botmux-zellij-pane */"' };
-    const child = { pid: 1236, parent: 1235, name: 'claude.exe' };
+    const runner = { pid: 1235, parent: 1234, name: 'node.exe', command: 'node -e "/* botmux-zellij-pane */"', created: server.created + 1000 };
+    const child = { pid: 1236, parent: 1235, name: 'claude.exe', created: runner.created + 1000 };
     vi.mocked(execFileSync).mockReturnValue(JSON.stringify([server, runner, child]) as any);
     expect(findWindowsZellijProcess('bmx-test', true)).toBe(1236);
+    vi.mocked(execFileSync).mockReturnValue(JSON.stringify([server, { ...runner, created: server.created - 1 }, child]) as any);
+    expect(findWindowsZellijProcess('bmx-test', true)).toBeNull();
+    vi.mocked(execFileSync).mockReturnValue(JSON.stringify([server, runner, { ...child, created: runner.created - 1 }]) as any);
+    expect(findWindowsZellijProcess('bmx-test', true)).toBeNull();
     vi.mocked(execFileSync).mockReturnValue(JSON.stringify([{ ...server, created: Date.now() + 1000 }, runner, child]) as any);
     expect(findWindowsZellijProcess('bmx-test', true)).toBeNull();
     vi.mocked(execFileSync).mockReturnValue(JSON.stringify([server, runner, child, { ...child, pid: 1237 }]) as any);
@@ -144,8 +148,8 @@ describe.skipIf(process.platform !== 'win32')('Windows Zellij', () => {
     vi.stubEnv('ZELLIJ_SOCKET_DIR', shortDir);
     vi.mocked(execFileSync).mockReturnValue(JSON.stringify([
       { pid: 1234, parent: 1, name: 'zellij.exe', command: `zellij.exe --server "${marker}"`, created: Date.now() - 5000 },
-      { pid: 1235, parent: 1234, name: 'node.exe', command: 'node -e "/* botmux-zellij-pane */"' },
-      { pid: 1236, parent: 1235, name: 'claude.exe' },
+      { pid: 1235, parent: 1234, name: 'node.exe', command: 'node -e "/* botmux-zellij-pane */"', created: Date.now() - 4000 },
+      { pid: 1236, parent: 1235, name: 'claude.exe', created: Date.now() - 3000 },
     ]) as any);
     expect(findWindowsZellijProcess('bmx-test', true)).toBe(1236);
   });

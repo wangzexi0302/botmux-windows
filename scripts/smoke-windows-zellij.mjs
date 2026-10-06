@@ -2,7 +2,8 @@
 // reattach to the SAME CLI process, and explicit close. No model calls.
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ZellijBackend } from '../dist/adapters/backend/zellij-backend.js';
@@ -11,7 +12,7 @@ import { probeZellijFunctional } from '../dist/setup/ensure-zellij.js';
 if (process.platform !== 'win32') throw new Error('Run on native Windows with Node.js.');
 const strictEnv = process.argv.includes('--strict');
 assert.deepEqual(probeZellijFunctional().ok, true, 'Zellij functional probe');
-const dir = mkdtempSync(join(tmpdir(), 'bmx-zellij-smoke-'));
+const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'bmx-zellij-smoke-')));
 const cwd = join(dir, '原生 Windows');
 mkdirSync(cwd);
 const name = `bmx-winsmoke-${process.pid}-${Date.now()}`;
@@ -22,7 +23,7 @@ const arg = '中文“引号”——→→ 😀😀 café a&b %PATH% "quoted"';
 writeFileSync(fixture, `
 const fs=require('node:fs');
 let data='';
-const save=()=>fs.writeFileSync(${JSON.stringify(report)},JSON.stringify({pid:process.pid,argv:process.argv.slice(2),cwd:process.cwd(),owner:process.env.BOTMUX_OWNER_OPEN_ID,legacy:process.env.__OWNER_OPEN_ID,env:process.env.BMX_TEST_VALUE,unlisted:process.env.BMX_UNLISTED_AUTH,cols:process.stdout.columns,rows:process.stdout.rows,data}));
+const save=()=>{fs.writeFileSync(${JSON.stringify(report + '.tmp')},JSON.stringify({pid:process.pid,argv:process.argv.slice(2),cwd:process.cwd(),pane:process.env.ZELLIJ_PANE_ID,session:process.env.ZELLIJ_SESSION_NAME,owner:process.env.BOTMUX_OWNER_OPEN_ID,legacy:process.env.__OWNER_OPEN_ID,env:process.env.BMX_TEST_VALUE,unlisted:process.env.BMX_UNLISTED_AUTH,cols:process.stdout.columns,rows:process.stdout.rows,data}));fs.renameSync(${JSON.stringify(report + '.tmp')},${JSON.stringify(report)});};
 process.stdin.setRawMode(true);process.stdin.setEncoding('utf8');
 process.stdin.on('data',s=>{data+=s;save();console.log('INPUT:'+s)});
 process.stdout.on('resize',save);save();console.log('BMX_READY');setInterval(()=>{},1000);
@@ -77,6 +78,8 @@ try {
   assert.equal(readReport().env, arg + '\nsecond line');
   assert.equal(readReport().owner, 'test-owner');
   assert.equal(readReport().legacy, 'test-owner');
+  assert.equal(readReport().pane, '0');
+  assert.equal(readReport().session, name);
   assert.equal(readReport().unlisted, strictEnv ? undefined : 'host-sentinel');
   await until(async () => (await request('pid')).pid === cliPid, 'native CLI PID discovery');
   const first = '\x1b[200~' + arg + '\n' + '中文——'.repeat(250) + '\x1b[201~';
@@ -90,14 +93,14 @@ try {
   await startHost();
   assert.deepEqual(await request('pid').then(r => [r.pid, r.reattach]), [cliPid, true]);
   await request('input', { data: 'AFTER_DETACH' });
-  await until(() => readReport().data.endsWith('AFTER_DETACH'), 'reattached input missing');
+  await until(() => readReport().data?.endsWith('AFTER_DETACH'), 'reattached input missing');
   host.kill();
   await until(() => host.exitCode !== null || host.signalCode !== null, 'second host did not die');
   assert.ok(alive(cliPid), 'CLI must survive unexpected worker death');
   await startHost();
   assert.deepEqual(await request('pid').then(r => [r.pid, r.reattach]), [cliPid, true]);
   await request('input', { data: 'AFTER_CRASH' });
-  await until(() => readReport().data.endsWith('AFTER_CRASH'), 'post-crash input missing');
+  await until(() => readReport().data?.endsWith('AFTER_CRASH'), 'post-crash input missing');
   await request('close');
   await until(() => !alive(cliPid), 'explicit close left the CLI running');
   assert.equal(ZellijBackend.probeSession(name), 'missing');
@@ -122,6 +125,6 @@ try {
   for (const child of allHosts) if (child.exitCode === null && child.signalCode === null) child.kill();
   ZellijBackend.killSession(name);
   await pause(1500);
-  if (!cliPid || !alive(cliPid)) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  if (!cliPid || !alive(cliPid)) await rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   else console.error(`Fixture still alive; diagnostic directory retained: ${dir}`);
 }

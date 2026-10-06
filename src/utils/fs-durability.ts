@@ -65,7 +65,9 @@ export function fsyncRegularFileSync(filePath: string): void {
     throw new Error(`durability target must be a regular file: ${filePath}`);
   }
 
-  const fd = openSync(filePath, 'r');
+  // FlushFileBuffers requires a handle opened for writing on Windows. This
+  // preserves strict error propagation rather than ignoring EPERM from fsync.
+  const fd = openSync(filePath, process.platform === 'win32' ? 'r+' : 'r');
   try {
     // Re-check the opened inode so a concurrently replaced path cannot turn a
     // file durability request into fsync of a directory/device.

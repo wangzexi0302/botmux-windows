@@ -5,6 +5,7 @@ import { normaliseCaptureLineEndings } from './tmux-pipe-backend.js';
 import { zellijEnv } from '../../setup/ensure-zellij.js';
 import { logger } from '../../utils/logger.js';
 import { LivenessGate, ADOPT_LIVENESS_MAX_FAILURES } from './liveness-gate.js';
+import { writeWindowsZellijInput } from '../../utils/windows-zellij.js';
 
 /**
  * ZellijObserveBackend — the zellij analogue of TmuxPipeBackend, for /adopt.
@@ -190,6 +191,7 @@ export class ZellijObserveBackend implements ObserveBackend {
   /** Literal text via write-chars (preserves UTF-8). */
   sendText(text: string): boolean {
     if (!text) return true;
+    if (process.platform === 'win32') return this.writeBytes(text);
     return this.action(['write-chars', '--pane-id', this.paneId, '--', text]) !== null;
   }
 
@@ -203,6 +205,13 @@ export class ZellijObserveBackend implements ObserveBackend {
 
   /** Bracketed paste — wrap so TUIs detect the boundary (mirrors paste-buffer -p). */
   pasteText(text: string): boolean {
+    if (process.platform === 'win32') {
+      // Separate native action clients can consume a standalone paste marker.
+      // Keep the frame together, as the managed Zellij backend does.
+      const accepted = this.writeBytes('\x1b[200~' + text + '\x1b[201~');
+      if (!accepted) this.writeBytes('\x1b[201~');
+      return accepted;
+    }
     if (!this.writeBytes('\x1b[200~')) return false;
     const bodyAccepted = this.sendText(text);
     const closeAccepted = this.writeBytes('\x1b[201~');
@@ -214,6 +223,10 @@ export class ZellijObserveBackend implements ObserveBackend {
    *  serialises the writes in arrival order. */
   private writeBytes(data: string): boolean {
     if (!data) return true;
+    if (process.platform === 'win32') {
+      try { writeWindowsZellijInput(this.session, data, this.paneId); return true; }
+      catch { return false; }
+    }
     const buf = Buffer.from(data, 'utf-8');
     const CHUNK = 512;
     for (let i = 0; i < buf.length; i += CHUNK) {

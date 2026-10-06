@@ -1,14 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
+import { join } from 'node:path';
 
 describe('loadHookConfigs mtime cache', () => {
   it('reuses file parse results until mtime or size changes', async () => {
     vi.resetModules();
 
     const reads: string[] = [];
+    const hooksPath = join('/tmp', 'hooks.json');
     const files = new Map<string, string>([
-      ['/tmp/hooks.json', JSON.stringify([{ event: 'topic.new', command: '/bin/echo one' }])],
+      [hooksPath, JSON.stringify([{ event: 'topic.new', command: '/bin/echo one' }])],
     ]);
-    let stat = { mtimeMs: 1000, size: files.get('/tmp/hooks.json')!.length };
+    let stat = { mtimeMs: 1000, size: files.get(hooksPath)!.length };
 
     vi.doMock('node:fs', () => ({
       existsSync: vi.fn((path: string) => files.has(path)),
@@ -29,13 +31,13 @@ describe('loadHookConfigs mtime cache', () => {
 
     expect(loadHookConfigs({ env: {} })).toEqual([{ event: 'topic.new', command: '/bin/echo one' }]);
 
-    files.set('/tmp/hooks.json', JSON.stringify([{ event: 'thread.reply', command: '/bin/echo two' }]));
+    files.set(hooksPath, JSON.stringify([{ event: 'thread.reply', command: '/bin/echo two' }]));
     expect(loadHookConfigs({ env: {} })).toEqual([{ event: 'topic.new', command: '/bin/echo one' }]);
-    expect(reads).toEqual(['/tmp/hooks.json']);
+    expect(reads).toEqual([hooksPath]);
 
-    stat = { mtimeMs: 2000, size: files.get('/tmp/hooks.json')!.length };
+    stat = { mtimeMs: 2000, size: files.get(hooksPath)!.length };
     expect(loadHookConfigs({ env: {} })).toEqual([{ event: 'thread.reply', command: '/bin/echo two' }]);
-    expect(reads).toEqual(['/tmp/hooks.json', '/tmp/hooks.json']);
+    expect(reads).toEqual([hooksPath, hooksPath]);
   });
 
   it('caches BOTMUX_HOOKS_JSON by raw env value', async () => {

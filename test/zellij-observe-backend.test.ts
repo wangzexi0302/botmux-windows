@@ -12,7 +12,7 @@ vi.mock('node:child_process', () => ({
   execFileSync: (bin: string, args: string[]) => {
     calls.push([bin, ...args]);
     if (failActions && args.includes('action')) throw new Error('pane unavailable');
-    if (failWriteChars && args.includes('write-chars')) throw new Error('body unavailable');
+    if (failWriteChars && (args.includes('write-chars') || args[3] === 'write' && args.slice(6).includes('120'))) throw new Error('body unavailable');
     if (args.includes('dump-screen')) return 'line one\nline two\nline three\n';
     if (args.includes('list-panes')) return listPanesResult();
     return '';
@@ -37,7 +37,8 @@ describe('ZellijObserveBackend input encoding', () => {
 
   it('sendText → targeted write-chars on the pane', () => {
     be.sendText('hello');
-    expect(actionArgs('write-chars')).toEqual(['write-chars', '--pane-id', P, '--', 'hello']);
+    if (process.platform === 'win32') expect(actionArgs('write')).toEqual(['write', '--pane-id', P, ...Array.from(Buffer.from('hello'), String)]);
+    else expect(actionArgs('write-chars')).toEqual(['write-chars', '--pane-id', P, '--', 'hello']);
   });
 
   it('sendSpecialKeys(Enter) → action write with the CR byte (13)', () => {
@@ -62,9 +63,13 @@ describe('ZellijObserveBackend input encoding', () => {
     // \e[200~  = 27 91 50 48 48 126 ; \e[201~ = 27 91 50 48 49 126
     const writes = calls.filter(c => c[4] === 'write').map(c => c.slice(7));
     const chars = calls.filter(c => c[4] === 'write-chars').map(c => c.slice(7));
-    expect(writes[0]).toEqual(['27', '91', '50', '48', '48', '126']); // open bracket
-    expect(chars[0]).toEqual(['--', 'x']);
-    expect(writes[1]).toEqual(['27', '91', '50', '48', '49', '126']); // close bracket
+    if (process.platform === 'win32') {
+      expect(writes).toEqual([['27', '91', '50', '48', '48', '126', '120', '27', '91', '50', '48', '49', '126']]);
+    } else {
+      expect(writes[0]).toEqual(['27', '91', '50', '48', '48', '126']);
+      expect(chars[0]).toEqual(['--', 'x']);
+      expect(writes[1]).toEqual(['27', '91', '50', '48', '49', '126']);
+    }
   });
 
   it('pasteText returns false when any bracketed-paste segment is rejected', () => {
@@ -84,7 +89,7 @@ describe('ZellijObserveBackend input encoding', () => {
     expect(accepted).toBe(false);
     const writes = calls.filter(c => c[4] === 'write').map(c => c.slice(7));
     expect(writes).toEqual([
-      ['27', '91', '50', '48', '48', '126'],
+      process.platform === 'win32' ? ['27', '91', '50', '48', '48', '126', '120', '27', '91', '50', '48', '49', '126'] : ['27', '91', '50', '48', '48', '126'],
       ['27', '91', '50', '48', '49', '126'],
     ]);
   });
