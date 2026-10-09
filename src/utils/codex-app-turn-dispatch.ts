@@ -35,7 +35,7 @@ export type CodexAppTurnDispatchSettlement =
     }
   | {
       ok: false;
-      reason: 'no_pending_turn' | 'turn_mismatch' | 'dispatch_attempt_mismatch';
+      reason: 'no_pending_turn' | 'missing_turn_id' | 'turn_mismatch' | 'dispatch_attempt_mismatch';
       markerTurnId?: string;
       expectedTurnId?: string;
       markerDispatchAttempt?: unknown;
@@ -152,7 +152,12 @@ export class CodexAppTurnDispatchQueue {
     const markerTurnId = typeof payload.turnId === 'string' && payload.turnId.length > 0
       ? payload.turnId
       : undefined;
-    if (markerTurnId && markerTurnId !== head.turnId) {
+    // An uncorrelated terminal turn is not the pending IM turn. Neither FIFO
+    // position nor a native app-server id proves Botmux message identity.
+    if (!markerTurnId) {
+      return { ok: false, reason: 'missing_turn_id', expectedTurnId: head.turnId };
+    }
+    if (markerTurnId !== head.turnId) {
       return {
         ok: false,
         reason: 'turn_mismatch',

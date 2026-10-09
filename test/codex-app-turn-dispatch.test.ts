@@ -2,6 +2,24 @@ import { describe, expect, it } from 'vitest';
 import { CodexAppTurnDispatchQueue } from '../src/utils/codex-app-turn-dispatch.js';
 
 describe('CodexAppTurnDispatchQueue', () => {
+  it.each([undefined, null, '', 7, {}, false])('rejects a final without a message id (%j) without consuming a pending reply', turnId => {
+    const queue = new CodexAppTurnDispatchQueue();
+    const head = queue.reserve('om-real-message', 3, 'dispatch-real');
+    queue.reserve('om-next-message', 4);
+
+    // A terminal-origin answer must not borrow the Lark FIFO head, even when
+    // its native turn id or attempt happens to look plausible.
+    expect(queue.settleFinal({ turnId, nativeTurnId: 'native-mouse', dispatchAttempt: 3 }))
+      .toMatchObject({ ok: false, reason: 'missing_turn_id', expectedTurnId: head.turnId });
+    expect(queue.settleFinal({ turnId }, false)).toMatchObject({ ok: false });
+    expect(queue.size()).toBe(2);
+    expect(queue.settleFinal({ turnId: head.turnId, nativeTurnId: 'native-real' }, false))
+      .toMatchObject({ ok: true, handle: head.handle, remaining: 1 });
+    expect(queue.size()).toBe(2);
+    expect(queue.commitExactHead(head.handle)).toBe(true);
+    expect(queue.settleFinal({ turnId: 'om-next-message' })).toMatchObject({ ok: true, remaining: 0 });
+  });
+
   it('attributes queued finals to immutable FIFO heads after later writes change worker globals', () => {
     const queue = new CodexAppTurnDispatchQueue();
     queue.reserve('turn-1', 4);

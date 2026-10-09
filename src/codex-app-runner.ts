@@ -30,6 +30,7 @@ import {
   takeCodexAppControlLocatorEndpoint,
 } from './utils/codex-app-control.js';
 import { CODEX_APP_NO_PROGRESS_TIMEOUT_MS } from './utils/codex-app-turn-liveness.js';
+import { CodexAppTerminalInput } from './utils/codex-app-terminal-input.js';
 import {
   TurnTokenUsageAccumulator,
   parseTokenUsagePair,
@@ -773,7 +774,6 @@ let activeTurnEpoch = 0;
  * belonging to an "unexpected" native turn. */
 let nativeActiveTurnId: string | undefined;
 const queue: QueuedInput[] = [];
-let inputBuffer = '';
 let processing = false;
 /** At most one pre-final Lark `turn/steer` admission runs at a time (checkpoint:
  * startResponsePending ≠ steerInFlight — this guards ONLY the steer RPC). */
@@ -2450,21 +2450,10 @@ function enqueueLine(line: string): void {
   void drainQueue();
 }
 
+const terminalInput = new CodexAppTerminalInput(enqueueLine, () => process.exit(130));
+
 function handleInput(data: Buffer): void {
-  const text = data.toString('utf8');
-  for (const ch of text) {
-    if (ch === '\u0003') {
-      process.exit(130);
-    } else if (ch === '\r' || ch === '\n') {
-      const line = inputBuffer;
-      inputBuffer = '';
-      enqueueLine(line);
-    } else if (ch === '\u007f' || ch === '\b') {
-      inputBuffer = inputBuffer.slice(0, -1);
-    } else {
-      inputBuffer += ch;
-    }
-  }
+  terminalInput.write(data);
 }
 
 async function initializeAppServer(deadlineAtMs: number): Promise<void> {
