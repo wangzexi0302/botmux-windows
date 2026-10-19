@@ -20,6 +20,8 @@ import { normalizeBrand } from '../im/lark/lark-hosts.js';
 import { beginBytedcliLogin, mintBytedcliJwts } from '../services/bytedcli-auth.js';
 import { resolveLarkCliHomeForTurn, beginLarkCliLogin } from '../services/lark-cli-auth.js';
 import type { BotConfig } from '../bot-registry.js';
+import { isLarkToolBound } from './lark-tool-binding.js';
+import { rememberLarkToolDelegation } from './lark-tool-delegation.js';
 import {
   triggerUserAuthApplies,
   TRIGGER_USER_AUTH_TOOLS,
@@ -85,8 +87,15 @@ export async function publishTurnCliIdentity(
   const { botConfig, sessionDataDir, sessionId, senderOpenId, locale, turnId } = args;
   const policy = botConfig.triggerUserAuth;
   const outcomes: ToolIdentityOutcome[] = [];
+  // Record before the new-entry shortcut (and before first worker spawn).
+  // The daemon has already verified the signed dispatch and target access.
+  rememberLarkToolDelegation(sessionDataDir, sessionId, turnId, args.delegatedIdentity);
 
   for (const tool of TRIGGER_USER_AUTH_TOOLS) {
+    if (tool === 'lark-cli' && isLarkToolBound(botConfig, sessionDataDir, sessionId)) {
+      outcomes.push({ tool, state: 'off' }); // the new session entry resolves this itself
+      continue;
+    }
     if (!triggerUserAuthApplies(policy, tool)) {
       outcomes.push({ tool, state: 'off' });
       continue;
@@ -188,7 +197,11 @@ async function publishOne(
   const identity = await resolveIdentityFor(tool, botConfig, senderOpenId);
   if (!identity) return await withheld();
 
-  writeSessionIdentity(sessionDataDir, sessionId, { ...identity, ...(turnId ? { turnId } : {}) });
+  writeSessionIdentity(sessionDataDir, sessionId, {
+    ...identity,
+    ...(turnId ? { turnId } : {}),
+    ...(senderOpenId ? { openId: senderOpenId } : {}),
+  });
   return { tool, state: 'user' };
 }
 

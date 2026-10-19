@@ -146,7 +146,7 @@ describe('worker app-runner control-channel wiring', () => {
       workerSource.indexOf('// Riff (and other remote HTTP backends)'),
     );
     expect(firstPromptTimeout).toContain(
-      "if (decideHardTimeoutAction(cliAdapter?.supportsTypeAhead === true) === 'flush')",
+      "if (decideHardTimeoutAction(runtimePtyInputPolicy().supportsTypeAhead) === 'flush')",
     );
     expect(firstPromptTimeout).not.toContain('codexAppRuntimeTypeAheadReady()');
   });
@@ -200,7 +200,7 @@ describe('worker app-runner control-channel wiring', () => {
     const callbackStart = workerSource.lastIndexOf('backend.onExit((code, signal) => {');
     const callbackEnd = workerSource.indexOf('backend.onError(', callbackStart);
     const callback = workerSource.slice(callbackStart, callbackEnd);
-    const fatalIdx = callback.indexOf("lastInitConfig?.cliId === 'codex-app' && codexAppControlFatal");
+    const fatalIdx = callback.indexOf('isCodexAppCliId(lastInitConfig?.cliId) && codexAppControlFatal');
     const fatalReturnIdx = callback.indexOf('return;', fatalIdx);
     const preparedIdx = callback.indexOf('const codexAppPreparedAtExit');
     const failIdx = callback.indexOf('failCodexAppControlGeneration(', preparedIdx);
@@ -379,7 +379,7 @@ describe('worker app-runner control-channel wiring', () => {
 
   it('enables OSC decoding for dsh and routes final frames to the generic path', () => {
     // The worker only decodes runner OSC frames for cliIds in this set.
-    expect(workerSource).toContain("const APP_RUNNER_OSC_CLI_IDS = new Set(['mira', 'mir', 'dsh']);");
+    expect(workerSource).toContain("const APP_RUNNER_OSC_CLI_IDS = new Set(['mira', 'mir', 'dsh', 'minimax']);");
     // dsh finals go through the generic (non-codex-app) settlement path.
     const markerStart = workerSource.indexOf('if (kind === \'final\' && typeof payload.content === \'string\')');
     expect(markerStart).toBeGreaterThan(-1);

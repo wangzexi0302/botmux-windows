@@ -33,5 +33,3 @@ export function createMiMoCodeAdapter(pathOverride?: string) {
     modelChoices: CLI_MODEL_CHOICES['mimocode'],
   });
 }
-
-export const create = createMiMoCodeAdapter;

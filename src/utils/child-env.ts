@@ -359,11 +359,18 @@ export const BOTMUX_INJECTED_ENV_KEYS = [
   'BOTMUX_AIDEN_CODEX_PARENT_PATH',
   'BOTMUX_AIDEN_CODEX_REAL_BIN',
   'BOTMUX_AIDEN_CODEX_REASONING_EFFORT',
+  // Path to the per-launch file holding the Codex shell_environment_policy
+  // overrides the aiden-codex PATH shim re-injects past Aiden's argv gate.
+  // Scrub like the other shim keys: the path embeds the session data dir and
+  // a stale value in a co-tenant pane would point the shim at another
+  // session's identity file.
+  'BOTMUX_AIDEN_CODEX_SHELL_CONFIG_FILE',
   'SESSION_DATA_DIR',
   'IS_SANDBOX',
   // botmux ask/hooks use these to locate the daemon and route back to the
   // current session/thread. The worker refreshes them per pane/turn.
   'BOTMUX_SESSION_ID',
+  'BOTMUX_SESSION_SCOPE',
   'BOTMUX_CHAT_ID',
   // Session-scoped plugin MCP relay. The worker owns the credential-bearing
   // Gateway; the CLI and its native MCP launcher receive only this socket
@@ -430,6 +437,14 @@ export const BOTMUX_INJECTED_ENV_KEYS = [
   // session-scoped, capability-gated routes (v3 workflow relay, vc-agent).
   // A port marker, not a credential — every route authenticates independently.
   'BOTMUX_DAEMON_IPC_PORT',
+  // Deployment-wide coordination mode. In primary mode the in-session CLI
+  // must route botmux send through the owning daemon instead of calling the
+  // provider directly. This is classification only; IPC auth remains required.
+  'BOTMUX_COORDINATION_MODE',
+  // Optional shared state root owned by a remote-runner implementation. The
+  // public daemon only transports the absolute path; provider-specific layout
+  // and credentials remain outside BotMux.
+  'BOTMUX_REMOTE_RUNNER_STATE_ROOT',
   // Fail-closed classification hint for macOS read isolation. This is never
   // authority; cmdSend also checks the host-owned marker + live challenge.
   'BOTMUX_READ_ISOLATED',
@@ -443,6 +458,9 @@ export const BOTMUX_INJECTED_ENV_KEYS = [
   // inherit a stale value from a co-tenant tmux server.
   'BOTMUX_MULTI_TOPIC_ENABLED',
   'BOTMUX_READY_COMMAND',
+  // Structured end-of-turn idle report command, injected per session for
+  // adapters that opt in (dsh-tui). Not a credential and not fatal when absent.
+  'BOTMUX_TURN_IDLE_COMMAND',
   // Per-session computed shell command string: the user's own statusLine
   // command that `botmux statusline` chains to after persisting the snapshot.
   // Not a credential — it is what the user already put in their settings.json.
@@ -458,6 +476,7 @@ export const BOTMUX_INJECTED_ENV_KEYS = [
   // every governed call silently resolves the real tool and runs as the machine
   // account.
   'BOTMUX_IDENTITY_BIN',
+  'BOTMUX_LARK_TOOL_BINDING',
   'ZDOTDIR',
   'BASH_ENV',
   // Git attribution for the acting person. Same reason: askpass and the
@@ -511,8 +530,8 @@ export const BOTMUX_INJECTED_ENV_KEYS = [
  * botmux ever sets, same contract as GROK_HOME; BOTS_CONFIG /
  * SESSION_DATA_DIR / BOTMUX_LARK_LIST_BOTS_API_* are documented ambient or
  * ecosystem-block config). The reverse also holds: session/sandbox routing
- * keys the pane transport never carries (BOTMUX_SESSION_SCOPE,
- * BOTMUX_SEND_RELAY) still need scrubbing here. Every entry below is
+ * keys the pane transport never carries (BOTMUX_SEND_RELAY) still need
+ * scrubbing here. Every entry below is
  * session-scoped BY CONSTRUCTION: the daemon/worker computes and injects it
  * per session AFTER every boundary scrub, and no ambient/env-file channel for
  * it exists.
@@ -534,8 +553,10 @@ export const SESSION_TURN_MARKER_ENV_KEYS = [
   '__OWNER_OPEN_ID',
   // Unguessable pane/profile authority channel (daemon-rotated capability).
   'BOTMUX_ORIGIN_CHANNEL_ID',
-  // Sandbox send-relay directory — a per-session capability path.
+  // Sandbox send-relay directory — a per-session capability path — and the
+  // credential-only "relay serves `send` only" scope marker that rides with it.
   'BOTMUX_SEND_RELAY',
+  'BOTMUX_SEND_RELAY_SCOPE',
   // Session-scoped MCP gateway capability + fail-closed marker.
   'BOTMUX_MCP_GATEWAY_SOCKET',
   'BOTMUX_MCP_GATEWAY_REQUIRED',
@@ -561,6 +582,10 @@ export const SESSION_TURN_MARKER_ENV_KEYS = [
   'BOTMUX_CODEX_APP_CONTROL_BOOTSTRAP',
   // Ready-gate hook command, sessionReadyHookCommand() per session.
   'BOTMUX_READY_COMMAND',
+  // Turn-idle report command, turnIdleHookCommand() per session. Same contract
+  // as BOTMUX_READY_COMMAND: a stale inherited copy would make a pane report
+  // against another session's turn, so it is scrubbed at every boundary.
+  'BOTMUX_TURN_IDLE_COMMAND',
   // Shadowed user statusLine command, resolved per session from the spawn cwd
   // + user settings (worker.ts); an inherited copy points at another project.
   'BOTMUX_STATUSLINE_CHAIN',
@@ -583,6 +608,7 @@ export function isCliIdentityPath(value: string | undefined): boolean {
 }
 
 export function scrubCliIdentityEnv(env: NodeJS.ProcessEnv): void {
+  delete env.BOTMUX_LARK_TOOL_BINDING;
   const bin = env.BOTMUX_IDENTITY_BIN?.replace(/[\\/]+$/, '');
   const managed = (value: string | undefined): boolean => !!value && (
     isCliIdentityPath(value) || !!bin && (value === bin || value.startsWith(`${bin}/`) || value.startsWith(`${bin}\\`))
@@ -632,6 +658,11 @@ export const PROXY_ENV_KEYS = [
  *  buildBotmuxEnvAssignments instead. */
 export const CA_BUNDLE_ENV_KEYS = ['SSL_CERT_FILE'] as const;
 
+/** Session-scoped scratch path. Forwarded per pane like proxy variables: it
+ * must override shell/tmux ambient values, but must not delete a user's own
+ * TMPDIR from a shared tmux server. */
+export const SESSION_TEMP_ENV_KEYS = ['TMPDIR', 'TMP', 'TEMP'] as const;
+
 const TMUX_CLIENT_STRIP_KEYS: ReadonlySet<string> = new Set([
   ...BOTMUX_INJECTED_ENV_KEYS,
   ...REDACTED_CHILD_ENV_KEYS,
@@ -646,6 +677,9 @@ const TMUX_CLIENT_STRIP_KEYS: ReadonlySet<string> = new Set([
   // Same reasoning as the proxy keys: keep a daemon-side CA bundle out of the
   // shared server's global env, but never delete one the user set there.
   ...CA_BUNDLE_ENV_KEYS,
+  // Keep the daemon/session scratch path out of a newly-created shared tmux
+  // server. Each botmux pane receives its own values via env(1) instead.
+  ...SESSION_TEMP_ENV_KEYS,
 ]);
 
 const TMUX_SERVER_GLOBAL_SCRUB_KEYS: ReadonlySet<string> = new Set([

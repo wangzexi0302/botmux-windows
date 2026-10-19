@@ -34,15 +34,20 @@ import {
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const sorted = (s: ReadonlySet<string>) => [...s].sort();
+const INTENTIONAL_NEW_COMMANDS = new Set(['/context-sharing', '/queue']);
+const withoutIntentional = (s: ReadonlySet<string>) => new Set([...s].filter(c => !INTENTIONAL_NEW_COMMANDS.has(c)));
 
 describe('command schema ↔ 冻结的 legacy 集合', () => {
   it('DAEMON_COMMANDS 逐字相等', () => {
-    expect(sorted(DAEMON_COMMANDS)).toEqual(sorted(ORACLE_DAEMON_COMMANDS));
+    expect(sorted(withoutIntentional(DAEMON_COMMANDS))).toEqual(sorted(ORACLE_DAEMON_COMMANDS));
+    expect(sorted(INTENTIONAL_NEW_COMMANDS)).toEqual(['/context-sharing', '/queue']);
+    expect(commandSpec('/context-sharing')).toMatchObject({ sessionPolicy: 'sessionless' });
+    expect(commandSpec('/queue')).toMatchObject({ sessionPolicy: 'existingOnly', multiline: true });
   });
   it('SESSIONLESS / EXISTING_SESSION_ONLY / MULTILINE 逐字相等', () => {
-    expect(sorted(SESSIONLESS_DAEMON_COMMANDS)).toEqual(sorted(ORACLE_SESSIONLESS_DAEMON_COMMANDS));
-    expect(sorted(EXISTING_SESSION_ONLY_DAEMON_COMMANDS)).toEqual(sorted(ORACLE_EXISTING_SESSION_ONLY_DAEMON_COMMANDS));
-    expect(sorted(MULTILINE_COMMANDS)).toEqual(sorted(ORACLE_MULTILINE_COMMANDS));
+    expect(sorted(withoutIntentional(SESSIONLESS_DAEMON_COMMANDS))).toEqual(sorted(ORACLE_SESSIONLESS_DAEMON_COMMANDS));
+    expect(sorted(withoutIntentional(EXISTING_SESSION_ONLY_DAEMON_COMMANDS))).toEqual(sorted(ORACLE_EXISTING_SESSION_ONLY_DAEMON_COMMANDS));
+    expect(sorted(withoutIntentional(MULTILINE_COMMANDS))).toEqual(sorted(ORACLE_MULTILINE_COMMANDS));
   });
   it('子集关系与不相交关系（command-trigger 的 reservedCommandKind 依赖它）', () => {
     for (const c of SESSIONLESS_DAEMON_COMMANDS) expect(DAEMON_COMMANDS.has(c), c).toBe(true);
@@ -56,6 +61,12 @@ describe('command schema ↔ 冻结的 legacy 集合', () => {
     expect(new Set(all).size).toBe(all.length);
     for (const n of all) expect(n).toMatch(/^\/[a-z][a-z0-9-]*$/);
     expect(commandSpec('/G')?.name).toBe('/group');
+  });
+  it('/effort 仅为 Codex App 注册，不遮蔽其它 CLI 的透传', () => {
+    expect(commandSpec('/effort')).toMatchObject({ cliId: 'codex-app', sessionPolicy: 'existingOnly' });
+    expect(DAEMON_COMMANDS.has('/effort')).toBe(false);
+    expect(EXISTING_SESSION_ONLY_DAEMON_COMMANDS.has('/effort')).toBe(false);
+    expect(PASSTHROUGH_COMMANDS.has('/effort')).toBe(true);
   });
 });
 
@@ -93,8 +104,8 @@ describe('command schema ↔ handleCommand switch', () => {
     const src = readFileSync(join(repoRoot, 'src/core/command-handler.ts'), 'utf-8');
     const body = src.slice(src.indexOf('export async function handleCommand('));
     const cases = new Set([...body.matchAll(/^\s{6}case '(\/[a-z0-9-]+)':/gm)].map(m => m[1]!));
-    for (const c of cases) expect(DAEMON_COMMANDS.has(c), `switch 有 ${c} 但 schema 没有`).toBe(true);
-    for (const c of DAEMON_COMMANDS) {
+    for (const c of cases) expect(commandSpec(c), `switch 有 ${c} 但 schema 没有`).toBeDefined();
+    for (const c of COMMANDS.flatMap(spec => [spec.name, ...(spec.aliases ?? [])])) {
       if (c === '/vc-auth') continue;
       expect(cases.has(c), `schema 有 ${c} 但 switch 没有 case`).toBe(true);
     }

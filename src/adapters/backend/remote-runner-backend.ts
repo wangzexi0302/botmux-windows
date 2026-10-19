@@ -14,7 +14,6 @@ import type {
 import {
   MAX_REMOTE_RUNNER_LINE_BYTES,
   REMOTE_RUNNER_BASE_CAPABILITIES,
-  REMOTE_RUNNER_PROTOCOL_VERSION,
   encodeRemoteRunnerCommand,
   normalizeRemoteRunnerBackendState,
   normalizeRemoteRunnerUsageReport,
@@ -26,6 +25,9 @@ import {
   type RemoteRunnerEvent,
   type RemoteRunnerOutboundMessage,
   type RemoteRunnerOutboundMessageResult,
+  type RemoteRunnerRecoveredTurn,
+  type RemoteRunnerSessionToolOperation,
+  type RemoteRunnerSessionToolResult,
   type RemoteRunnerUsageReport,
 } from './remote-runner-protocol.js';
 import type { RemoteRunnerConfig } from './remote-runner-config.js';
@@ -38,12 +40,30 @@ type PendingRequest = {
   timer: NodeJS.Timeout;
 };
 
+type RemoteRunnerFailureEvent = Extract<RemoteRunnerEvent, { type: 'failure' }>;
+
+/** Preserve the provider's structured failure classification across the
+ * request Promise boundary. A plain Error loses whether an operation was
+ * provably not applied and therefore safe to retry. */
+class RemoteRunnerRequestError extends Error {
+  constructor(readonly event: RemoteRunnerFailureEvent) {
+    super(`${event.code}: ${event.message}`);
+    this.name = 'RemoteRunnerRequestError';
+  }
+}
+
 type OutboundOperation = {
   fingerprint: string;
   result: Promise<RemoteRunnerOutboundMessageResult>;
 };
 
+type SessionToolOperation = {
+  fingerprint: string;
+  result: Promise<RemoteRunnerSessionToolResult>;
+};
+
 const MAX_OUTBOUND_MESSAGES_PER_TURN = 10;
+const MAX_SESSION_TOOLS_PER_TURN = 30;
 
 function boundedTimeout(value: number | undefined, fallback: number): number {
   if (!Number.isSafeInteger(value) || value! < 100 || value! > 300_000) return fallback;
@@ -107,14 +127,24 @@ export class RemoteRunnerBackend implements SessionBackend {
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly outboundOperations = new Map<string, OutboundOperation>();
   private outboundOperationCount = 0;
-  private readonly outboundResultWrites = new Map<string, number>();
+  /** Exact active turn whose negotiated final outbound message has already
+   * been accepted by the host transport. A provider may still emit its normal
+   * final event afterwards (and some providers synthesize an empty-result
+   * diagnostic there); that content is no longer another user-facing answer. */
+  private finalOutboundDeliveredTurnId: string | null = null;
+  private readonly sessionToolOperations = new Map<string, SessionToolOperation>();
+  private sessionToolOperationCount = 0;
+  private readonly hostResultWrites = new Map<string, number>();
   private dataCb: ((data: string) => void) | null = null;
   private screenResyncCb: ((snapshot: string) => void) | null = null;
   private exitCb: ((code: number | null, signal: string | null) => void) | null = null;
   private taskDoneCb: (() => void) | null = null;
   private turnFinalCb: ((text: string, turnId?: string) => void) | null = null;
   private turnFailureCb: ((failure: BackendTurnFailure) => void) | null = null;
+  private recoveredTurn: RemoteRunnerRecoveredTurn | null = null;
+  private turnRecoveredCb: ((turn: RemoteRunnerRecoveredTurn) => void) | null = null;
   private outboundMessageCb: ((message: RemoteRunnerOutboundMessage) => Promise<RemoteRunnerOutboundMessageResult>) | null = null;
+  private sessionToolCb: ((operation: RemoteRunnerSessionToolOperation) => Promise<RemoteRunnerSessionToolResult>) | null = null;
   private readyCb: (() => void) | null = null;
   private stateCb: ((state: RemoteRunnerBackendState) => void) | null = null;
   private usageCb: ((usage: RemoteRunnerUsageReport) => void) | null = null;
@@ -221,7 +251,10 @@ export class RemoteRunnerBackend implements SessionBackend {
     this.activeTurnAccepted = false;
     this.outboundOperations.clear();
     this.outboundOperationCount = 0;
-    this.outboundResultWrites.clear();
+    this.finalOutboundDeliveredTurnId = null;
+    this.sessionToolOperations.clear();
+    this.sessionToolOperationCount = 0;
+    this.hostResultWrites.clear();
     this.turnSettled = new Promise<void>(resolve => { this.settleTurn = resolve; });
     const requestId = this.requestId('turn');
     this.activeTurnRequestId = requestId;
@@ -230,6 +263,7 @@ export class RemoteRunnerBackend implements SessionBackend {
         requestId,
         turnId: input.turnId,
         content: input.content,
+        ...(input.dispatchAttempt !== undefined ? { dispatchAttempt: input.dispatchAttempt } : {}),
         ...(input.trustedCaller ? { trustedCaller: input.trustedCaller } : {}),
       }), event => event.type === 'status' && event.status === 'busy', this.operationTimeoutMs);
       if (acknowledgement.type === 'failure') {
@@ -293,9 +327,21 @@ export class RemoteRunnerBackend implements SessionBackend {
   onTaskDone(cb: () => void): void { this.taskDoneCb = cb; }
   onTurnFinal(cb: (text: string, turnId?: string) => void): void { this.turnFinalCb = cb; }
   onTurnFailure(cb: (failure: BackendTurnFailure) => void): void { this.turnFailureCb = cb; }
+  onTurnRecovered(cb: (turn: RemoteRunnerRecoveredTurn) => void): void {
+    this.turnRecoveredCb = cb;
+    if (this.recoveredTurn) {
+      const recovered = this.recoveredTurn;
+      queueMicrotask(() => {
+        if (this.turnRecoveredCb === cb && this.recoveredTurn === recovered) cb(recovered);
+      });
+    }
+  }
   onOutboundMessage(
     cb: (message: RemoteRunnerOutboundMessage) => Promise<RemoteRunnerOutboundMessageResult>,
   ): void { this.outboundMessageCb = cb; }
+  onSessionTool(
+    cb: (operation: RemoteRunnerSessionToolOperation) => Promise<RemoteRunnerSessionToolResult>,
+  ): void { this.sessionToolCb = cb; }
   onReady(cb: () => void): void {
     this.readyCb = cb;
     if (this.ready) queueMicrotask(cb);
@@ -341,6 +387,17 @@ export class RemoteRunnerBackend implements SessionBackend {
       this.closePrepared = true;
       return { ok: true };
     } catch (error) {
+      if (error instanceof RemoteRunnerRequestError
+          && error.event.status === 'failed'
+          && error.event.retryable) {
+        this.closing = false;
+        return {
+          ok: false,
+          error: error.message,
+          recovery: 'retryable',
+          admission: 'restorable',
+        };
+      }
       this.closeOutcomeUncertain = true;
       return {
         ok: false,
@@ -581,10 +638,14 @@ export class RemoteRunnerBackend implements SessionBackend {
       this.handleOutboundMessage(event);
       return;
     }
+    if (event.type === 'session_tool') {
+      this.handleSessionTool(event);
+      return;
+    }
     if (event.type === 'final') {
       if (!this.acceptAcknowledgedTurn(event.turnId)) return;
-      if ((this.outboundResultWrites.get(event.turnId) ?? 0) > 0) {
-        this.failProtocol('remote runner emitted final before an outbound message result was returned');
+      if ((this.hostResultWrites.get(event.turnId) ?? 0) > 0) {
+        this.failProtocol('remote runner emitted final before a host operation result was returned');
         return;
       }
       if (event.state && !this.applyState(event.state)) return;
@@ -596,7 +657,14 @@ export class RemoteRunnerBackend implements SessionBackend {
         }
         this.usageCb?.(usage);
       }
-      this.turnFinalCb?.(event.content, event.turnId);
+      // `outbound_message_final` is a bilateral terminal-delivery contract:
+      // once the host has a verified delivered receipt, the provider's later
+      // final event settles lifecycle only. Rejected/unknown outbound attempts
+      // keep the provider final untouched so the user still receives an outcome.
+      this.turnFinalCb?.(
+        this.finalOutboundDeliveredTurnId === event.turnId ? '' : event.content,
+        event.turnId,
+      );
       this.finishActiveTurn();
       this.taskDoneCb?.();
       return;
@@ -650,13 +718,41 @@ export class RemoteRunnerBackend implements SessionBackend {
       this.failProtocol(`remote runner emitted unexpected ${event.type} response`);
       return;
     }
+    if (event.type === 'ready' && event.recoveredTurn) {
+      // Adopt the recovered turn before resolving the resume request. A provider
+      // may emit ready and a terminal event in one stdout chunk; promise
+      // continuations do not run until consumeStdout returns, so deferring this
+      // to initialize() would reject that terminal as an unacknowledged turn.
+      if (pending.command.type !== 'resume') {
+        this.failProtocol('remote runner reported a recovered turn outside resume');
+        return;
+      }
+      if (!this.providerCapabilities.has('turn_recovery')) {
+        this.failProtocol('remote runner reported a recovered turn without advertising turn_recovery');
+        return;
+      }
+      if (event.recoveredTurn.generation !== event.state.generation) {
+        this.failProtocol('remote runner recovered turn belongs to another backend generation');
+        return;
+      }
+      if (this.activeTurnId) {
+        this.failProtocol('remote runner reported recovery while another turn is active');
+        return;
+      }
+      this.activeTurnId = event.recoveredTurn.turnId;
+      this.activeTurnAccepted = true;
+      this.finalOutboundDeliveredTurnId = null;
+      this.turnSettled = new Promise<void>(resolve => { this.settleTurn = resolve; });
+      this.recoveredTurn = event.recoveredTurn;
+      this.turnRecoveredCb?.(event.recoveredTurn);
+    }
     clearTimeout(pending.timer);
     this.pendingRequests.delete(id);
     if (pending.command.type === 'turn' && this.activeTurnRequestId === id
         && event.type === 'status' && event.status === 'busy') {
       this.activeTurnAccepted = true;
     }
-    if (event.type === 'failure') pending.reject(new Error(`${event.code}: ${event.message}`));
+    if (event.type === 'failure') pending.reject(new RemoteRunnerRequestError(event));
     else pending.resolve(event);
   }
 
@@ -680,12 +776,29 @@ export class RemoteRunnerBackend implements SessionBackend {
       message.content,
       message.responseKind,
       message.mention,
+      message.mentions ?? [],
+      message.images ?? [],
     ])).digest('hex');
   }
 
   private handleOutboundMessage(message: RemoteRunnerOutboundMessage): void {
     if (!this.providerCapabilities.has('outbound_message')) {
       this.failProtocol('remote runner emitted outbound_message without advertising the capability');
+      return;
+    }
+    if (message.mention === 'explicit'
+        && !this.providerCapabilities.has('outbound_message_explicit_mention')) {
+      this.failProtocol(
+        'remote runner emitted explicit outbound mentions without advertising the capability',
+      );
+      return;
+    }
+    if (message.responseKind === 'final'
+        && (!this.providerCapabilities.has('outbound_message_final')
+          || !this.requiredCapabilities.includes('outbound_message_final'))) {
+      this.failProtocol(
+        'remote runner emitted a final outbound message without explicit host and provider capability',
+      );
       return;
     }
     if (!this.acceptAcknowledgedTurn(message.turnId)) return;
@@ -729,13 +842,16 @@ export class RemoteRunnerBackend implements SessionBackend {
       this.outboundOperations.set(message.operationId, { fingerprint, result });
     }
 
-    this.outboundResultWrites.set(
+    this.hostResultWrites.set(
       message.turnId,
-      (this.outboundResultWrites.get(message.turnId) ?? 0) + 1,
+      (this.hostResultWrites.get(message.turnId) ?? 0) + 1,
     );
     void result.then(async (settled) => {
       if (this.activeTurnId !== message.turnId
           || this.state?.generation !== message.generation) return;
+      if (message.responseKind === 'final' && settled.outcome === 'delivered') {
+        this.finalOutboundDeliveredTurnId = message.turnId;
+      }
       await this.send(remoteRunnerCommand('outbound_message_result', {
         requestId: this.requestId('outbound-message-result'),
         operationId: message.operationId,
@@ -750,10 +866,110 @@ export class RemoteRunnerBackend implements SessionBackend {
         );
       }
     }).finally(() => {
-      const pending = this.outboundResultWrites.get(message.turnId);
+      const pending = this.hostResultWrites.get(message.turnId);
       if (pending === undefined) return;
-      if (pending <= 1) this.outboundResultWrites.delete(message.turnId);
-      else this.outboundResultWrites.set(message.turnId, pending - 1);
+      if (pending <= 1) this.hostResultWrites.delete(message.turnId);
+      else this.hostResultWrites.set(message.turnId, pending - 1);
+    });
+  }
+
+  private sessionToolFingerprint(operation: RemoteRunnerSessionToolOperation): string {
+    return createHash('sha256').update(JSON.stringify([
+      operation.turnId,
+      operation.generation,
+      operation.request,
+      operation.controllerOpenId ?? null,
+    ])).digest('hex');
+  }
+
+  private handleSessionTool(operation: RemoteRunnerSessionToolOperation): void {
+    if (!this.providerCapabilities.has('session_tool')) {
+      this.failProtocol('remote runner emitted session_tool without advertising the capability');
+      return;
+    }
+    const scheduleTool = operation.request.tool.startsWith('schedule.');
+    if (scheduleTool && (!this.providerCapabilities.has('session_tool_schedule')
+        || !this.requiredCapabilities.includes('session_tool_schedule'))) {
+      this.failProtocol(
+        'remote runner emitted a schedule session tool without explicit host and provider capability',
+      );
+      return;
+    }
+    if (operation.controllerOpenId
+        && (!scheduleTool
+          || !this.providerCapabilities.has('session_tool_schedule_actor')
+          || !this.requiredCapabilities.includes('session_tool_schedule_actor'))) {
+      this.failProtocol(
+        'remote runner emitted a schedule Actor without explicit host and provider capability',
+      );
+      return;
+    }
+    if (!this.acceptAcknowledgedTurn(operation.turnId)) return;
+    if (operation.generation !== this.state?.generation) {
+      this.failProtocol('remote runner session tool belongs to another backend generation');
+      return;
+    }
+
+    const fingerprint = this.sessionToolFingerprint(operation);
+    const existing = this.sessionToolOperations.get(operation.operationId);
+    let result: Promise<RemoteRunnerSessionToolResult>;
+    if (existing) {
+      result = existing.fingerprint === fingerprint
+        ? existing.result
+        : Promise.resolve({
+            outcome: 'rejected',
+            code: 'operation_id_conflict',
+            message: 'The session tool operation id was reused with a different payload.',
+          });
+    } else if (this.sessionToolOperationCount >= MAX_SESSION_TOOLS_PER_TURN) {
+      result = Promise.resolve({
+        outcome: 'rejected',
+        code: 'session_tool_rate_limited',
+        message: `A remote turn may execute at most ${MAX_SESSION_TOOLS_PER_TURN} session tools.`,
+      });
+    } else {
+      this.sessionToolOperationCount++;
+      const callback = this.sessionToolCb;
+      result = callback
+        ? Promise.resolve().then(() => callback(operation)).catch((error): RemoteRunnerSessionToolResult => ({
+            outcome: 'unknown',
+            code: 'session_tool_execution_unknown',
+            message: (error instanceof Error ? error.message : String(error)).slice(0, 4096)
+              || 'The session tool failed with an unknown result.',
+          }))
+        : Promise.resolve({
+            outcome: 'rejected',
+            code: 'session_tool_unavailable',
+            message: 'The BotMux host did not install a session tool handler.',
+          });
+      this.sessionToolOperations.set(operation.operationId, { fingerprint, result });
+    }
+
+    this.hostResultWrites.set(
+      operation.turnId,
+      (this.hostResultWrites.get(operation.turnId) ?? 0) + 1,
+    );
+    void result.then(async (settled) => {
+      if (this.activeTurnId !== operation.turnId
+          || this.state?.generation !== operation.generation) return;
+      await this.send(remoteRunnerCommand('session_tool_result', {
+        requestId: this.requestId('session-tool-result'),
+        operationId: operation.operationId,
+        turnId: operation.turnId,
+        generation: operation.generation,
+        result: settled,
+      }));
+    }).catch(error => {
+      if (this.activeTurnId === operation.turnId) {
+        this.failProtocol(
+          `remote runner session tool result could not be returned: ${error instanceof Error ? error.message : error}`,
+        );
+      }
+    }).finally(() => {
+      const pending = this.hostResultWrites.get(operation.turnId);
+      if (pending === undefined) return;
+      if (pending <= 1) this.hostResultWrites.delete(operation.turnId);
+      else this.hostResultWrites.set(operation.turnId, pending - 1);
     });
   }
 
@@ -768,9 +984,13 @@ export class RemoteRunnerBackend implements SessionBackend {
     this.activeTurnId = null;
     this.activeTurnAccepted = false;
     this.activeTurnRequestId = null;
+    this.recoveredTurn = null;
     this.outboundOperations.clear();
     this.outboundOperationCount = 0;
-    if (turnId) this.outboundResultWrites.delete(turnId);
+    this.finalOutboundDeliveredTurnId = null;
+    this.sessionToolOperations.clear();
+    this.sessionToolOperationCount = 0;
+    if (turnId) this.hostResultWrites.delete(turnId);
     const settle = this.settleTurn;
     this.settleTurn = null;
     settle?.();

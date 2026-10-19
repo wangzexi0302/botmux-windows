@@ -80,8 +80,9 @@ describe.skipIf(process.platform !== 'win32')('Windows Zellij', () => {
 
   it('scrubs session/provider authority from the server environment', () => {
     const env = zellijEnv({ Path: 'C:\\bin', BOTMUX_OWNER_OPEN_ID: 'owner', __OWNER_OPEN_ID: 'owner',
-      LARK_APP_SECRET: 'secret', ZELLIJ: '0', zellij_session_name: 'outer', ZELLIJ_PANE_ID: '2', HTTPS_PROXY: 'secret-proxy' });
-    expect(env).toEqual({ Path: 'C:\\bin' });
+      LARK_APP_SECRET: 'secret', ZELLIJ: '0', zellij_session_name: 'outer', ZELLIJ_PANE_ID: '2', HTTPS_PROXY: 'secret-proxy',
+      Tmp: 'C:\\session', temp: 'C:\\session', tmpdir: 'C:\\session' });
+    expect(env).toEqual({ Path: 'C:\\bin', TMPDIR: tmpdir(), TMP: tmpdir(), TEMP: tmpdir() });
   });
 
   it('writes all encoded bytes to an explicit pane in bounded ordered chunks', () => {

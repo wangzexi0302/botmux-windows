@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readlinkSync } from 'node:fs';
 import { readDurableProcessIdentity, WINDOWS_PROCESS_QUERY_TIMEOUT_MS } from '../utils/process-identity.js';
+import { pidNotProvablyGone } from '../utils/process-alive.js';
 import type { FleetState } from './fleet-supervisor-policy.js';
 
 export interface FleetProcessAttestation {
@@ -99,11 +100,8 @@ export const fleetProcessIdentityRuntime: FleetProcessIdentityRuntime = {
     try { return readlinkSync(`/proc/${pid}/ns/pid`) || undefined; }
     catch { return undefined; }
   },
-  pidExists(pid): boolean {
-    try { process.kill(pid, 0); return true; } catch (error) {
-      return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-    }
-  },
+  // Only ESRCH proves the pid gone; EPERM / unexpected errors stay "exists".
+  pidExists: pidNotProvablyGone,
 };
 
 /**

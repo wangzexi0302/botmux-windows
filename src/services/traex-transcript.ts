@@ -41,24 +41,24 @@ import {
   openSync,
   readSync,
   readdirSync,
-  readlinkSync,
   statSync,
   type Dirent,
 } from 'node:fs';
-import { execFileSync } from 'node:child_process';
-import { platform } from 'node:os';
-import { isAbsolute, join, relative, sep } from 'node:path';
+import { basename, isAbsolute, join, relative, sep } from 'node:path';
 import {
   splitCodexEventsByCutoff,
   extractLastCodexTurn,
   type CodexBridgeEvent,
   type CodexDrainResult,
-  codexSessionIdFromRolloutPath,
   codexCotEntriesFromResponseItem,
   codexTaskFailureCode,
   CODEX_OUTPUT_LIMIT_ERROR_CODE,
   isExactCodexOutputLimitError,
   safeFailureSummary,
+  codexHistorySidIsOwned,
+  readLatestRolloutRuntime,
+  rolloutAbortErrorCode,
+  runtimeFromTurnContext,
 } from './codex-transcript.js';
 import {
   BRIDGE_NOTHING_TO_SEND_SENTINEL,
@@ -66,8 +66,9 @@ import {
 } from './bridge-fallback-gate.js';
 import { isInternalCodexSessionMeta } from './codex-session-meta.js';
 import { openDatabaseSyncNow } from './sqlite-compat.js';
-import { baselineJsonlCursor } from './jsonl-cursor.js';
+import { beginJsonlDrain, iterateJsonlLines } from './jsonl-cursor.js';
 import { traeSessionsRoot, traeStateDbPath } from './traex-paths.js';
+import { listProcessOpenFiles } from '../utils/process-open-files.js';
 
 export { splitCodexEventsByCutoff as splitTraexEventsByCutoff };
 export { extractLastCodexTurn as extractLastTraexTurn };
@@ -99,15 +100,14 @@ export interface TraexRuntimeSnapshot {
   reasoningEffort?: string;
 }
 
-const IS_LINUX = platform() === 'linux';
 const TRAEX_SESSION_META_SCAN_MAX_BYTES = 4 * 1024 * 1024;
 const TRAEX_ROLLOUT_LOOKUP_INITIAL_BACKOFF_MS = 2_000;
 const TRAEX_ROLLOUT_LOOKUP_MAX_BACKOFF_MS = 8_000;
 const TRAEX_ROLLOUT_LOOKUP_MISS_CACHE_MAX = 256;
-const TRAEX_LSOF_TIMEOUT_MS = 1_000;
 const TRAEX_YEAR_DIR_RE = /^\d{4}$/;
 const TRAEX_MONTH_DIR_RE = /^(?:0[1-9]|1[0-2])$/;
 const TRAEX_DAY_DIR_RE = /^(?:0[1-9]|[12]\d|3[01])$/;
+const TRAEX_ROLLOUT_SESSION_RE = /^rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?\.jsonl$/i;
 
 interface TraexRolloutLookupMiss {
   nextFilesystemScanAtMs: number;
@@ -118,6 +118,17 @@ interface TraexRolloutLookupMiss {
  *  on every call, so a newly indexed rollout attaches immediately; only the
  *  compatibility filesystem scan is delayed after repeated misses. */
 const traexRolloutLookupMisses = new Map<string, TraexRolloutLookupMiss>();
+
+/** Extract the stable TRAE thread id from a rollout filename.
+ *
+ * Older releases used `rollout-<ts>-<thread-id>.jsonl`. TraeX 0.209.1 also
+ * writes resumed history segments as
+ * `rollout-<ts>-<thread-id>_<first-turn-id>.jsonl`. The suffix after `_` is a
+ * turn id, not a new resumable session id. The generic Codex parser selects
+ * the final UUID and therefore cannot be used for TRAE segmented rollouts. */
+export function traexSessionIdFromRolloutPath(path: string): string | undefined {
+  return TRAEX_ROLLOUT_SESSION_RE.exec(basename(path))?.[1];
+}
 
 type DatabaseSyncLike = {
   prepare(sql: string): StatementSyncLike;
@@ -189,7 +200,7 @@ interface TraexPendingAgentMessages {
    *  last one is a final candidate. NOT phase-guaranteed: a candidate ending
    *  in the nothing-to-send sentinel is deliberate-silence narration, and the
    *  sentinel guard at task_complete distinguishes the two. */
-  lastAgentItemText?: string;
+  agentItems?: Map<string, { text: string; phase?: string; canonical: boolean }>;
   /** Last PHASE-LESS `agent_message` since the turn's user_message. A dialect
    *  that dropped the `phase` field (cf. codex >= 0.146) makes commentary and
    *  final byte-identical, so the last phase-less message is the best final
@@ -197,13 +208,20 @@ interface TraexPendingAgentMessages {
   lastAgentMessageNoPhase?: string;
 }
 
-const traexPendingAgentCache = new Map<string, TraexPendingAgentMessages>();
+interface TraexPendingAgentTurns {
+  turns: Map<string, TraexPendingAgentMessages>;
+  activeKey?: string;
+}
+
+const traexPendingAgentCache = new Map<string, TraexPendingAgentTurns>();
 const TRAEX_PENDING_AGENT_CACHE_MAX = 512;
+const TRAEX_PENDING_AGENT_TURNS_PER_PATH_MAX = 64;
+const TRAEX_PENDING_AGENT_ITEMS_PER_TURN_MAX = 64;
 
 /** New and legacy user event dialects can mirror one another in the same
  * rollout. Keep de-duplication scoped to a rollout and its stable turn id:
  * identical prompts in distinct turns must remain distinct local turns. */
-const traexSeenUserTurns = new Map<string, Set<string>>();
+const traexSeenUserTurns = new Map<string, Map<string, string | undefined>>();
 /** TraeX can write the legacy and item_completed user records in either order.
  * Remember the one missing counterpart across incremental drains. The state
  * belongs only to the currently open native turn and is cleared at its
@@ -213,6 +231,7 @@ interface TraexPendingUserMirror {
   timestampMs: number;
   expected: 'legacy' | 'item' | 'terminal';
   sourceTurnId?: string;
+  agentStateKey?: string;
   /** A native successor was allowed to start while this id-less legacy turn
    * stayed queued, so a terminal may need to bind it if its item mirror never
    * arrives. */
@@ -229,11 +248,11 @@ const TRAEX_SEEN_USER_TURNS_PER_PATH_MAX = 4096;
 const TRAEX_PENDING_USER_MIRRORS_PER_PATH_MAX = 64;
 const TRAEX_LEGACY_USER_MIRROR_WINDOW_MS = 5_000;
 
-function claimTraexUserTurn(path: string, turnId: unknown): boolean {
+function claimTraexUserTurn(path: string, turnId: unknown, legacyStateKey?: string): boolean {
   if (typeof turnId !== 'string' || turnId.length === 0) return true;
   let seen = traexSeenUserTurns.get(path);
   if (!seen) {
-    seen = new Set<string>();
+    seen = new Map<string, string | undefined>();
     traexSeenUserTurns.set(path, seen);
     if (traexSeenUserTurns.size > TRAEX_SEEN_USER_TURN_PATHS_MAX) {
       const oldestPath = traexSeenUserTurns.keys().next().value;
@@ -241,7 +260,7 @@ function claimTraexUserTurn(path: string, turnId: unknown): boolean {
     }
   }
   if (seen.has(turnId)) return false;
-  seen.add(turnId);
+  seen.set(turnId, legacyStateKey);
   if (seen.size > TRAEX_SEEN_USER_TURNS_PER_PATH_MAX) {
     const oldestTurnId = seen.keys().next().value;
     if (oldestTurnId) seen.delete(oldestTurnId);
@@ -313,6 +332,7 @@ function takeTraexUserMirrorAtTerminal(
   pending: TraexDrainUserMirror[],
   sourceTurnId: string,
   nativeUserWasSeen: boolean,
+  legacyStateKey?: string,
 ): TraexDrainUserMirror | undefined {
   // A paired legacy-first turn leaves a terminal marker, while item-first
   // state carries its id directly. Prefer either exact match so a terminal
@@ -320,6 +340,10 @@ function takeTraexUserMirrorAtTerminal(
   const exactIndex = pending.findIndex(candidate => candidate.sourceTurnId === sourceTurnId);
   if (exactIndex >= 0) {
     return pending.splice(exactIndex, 1)[0];
+  }
+  if (legacyStateKey !== undefined) {
+    const replayIndex = pending.findIndex(candidate => candidate.agentStateKey === legacyStateKey);
+    if (replayIndex >= 0) return pending.splice(replayIndex, 1)[0];
   }
   // A terminal for a turn whose native user record was already observed must
   // not consume an earlier id-less legacy turn. That predecessor can only be
@@ -380,10 +404,68 @@ function itemCompletedAgentText(item: unknown): string {
  * events, these append records contain both the original tool call and its
  * returned content, in model order. Normalize the array-shaped tool output to
  * the string shape understood by the shared Codex CoT extractor. */
-function traexHistoryCotEntries(payload: any): CodexBridgeEvent['cotEntries'] {
-  if (payload?.operation !== 'append' || !Array.isArray(payload.items)) return [];
+function traexDisplayCompletions(payload: any, sourceSessionId?: string): any[] {
+  if (payload?.operation !== 'append' || !Array.isArray(payload.display_completions)) return [];
+  return payload.display_completions.filter((completion: any) =>
+    completion && typeof completion === 'object'
+    && typeof completion.turn_id === 'string' && completion.turn_id
+    && completion.turn_id === payload.turn_id
+    && (!sourceSessionId || completion.thread_id === sourceSessionId));
+}
+
+function traexHistoryCotEntries(payload: any, sourceSessionId?: string): CodexBridgeEvent['cotEntries'] {
+  if (payload?.operation !== 'append') return [];
+  const modelItems = Array.isArray(payload.items) ? payload.items : [];
+  const displayReasoning = new Map<string, any>();
+  for (const completion of traexDisplayCompletions(payload, sourceSessionId)) {
+    const item = completion.item;
+    if (item?.type !== 'Reasoning' || typeof item.id !== 'string' || !item.id) continue;
+    const summary = Array.isArray(item.summary_text)
+      ? item.summary_text.filter((text: unknown) => typeof text === 'string' && text.length > 0)
+      : [];
+    const raw = Array.isArray(item.raw_content)
+      ? item.raw_content.filter((text: unknown) => typeof text === 'string' && text.length > 0)
+      : [];
+    if (summary.length === 0 && raw.length === 0) continue;
+    displayReasoning.set(item.id, {
+      type: 'reasoning',
+      id: item.id,
+      summary: summary.map((text: string) => ({ type: 'summary_text', text })),
+      content: raw.map((text: string) => ({ type: 'reasoning_text', text })),
+    });
+  }
+  const modelReasoningIndices = new Map<string, number>();
+  for (const [index, item] of modelItems.entries()) {
+    if (item?.type === 'reasoning' && typeof item.id === 'string') {
+      modelReasoningIndices.set(item.id, index);
+    }
+  }
+  const reasoningItems = Array.from(displayReasoning.values());
+  const firstAnchor = reasoningItems.find(item => modelReasoningIndices.has(item.id));
+  let insertionIndex = firstAnchor ? modelReasoningIndices.get(firstAnchor.id)! : 0;
+  const reasoningInsertions = new Map<number, any[]>();
+  for (const item of reasoningItems) {
+    const modelIndex = modelReasoningIndices.get(item.id);
+    if (modelIndex !== undefined) {
+      insertionIndex = modelIndex + 1;
+    } else {
+      const insertion = reasoningInsertions.get(insertionIndex) ?? [];
+      insertion.push(item);
+      reasoningInsertions.set(insertionIndex, insertion);
+    }
+  }
+  const items = modelItems.flatMap((item: any, index: number) => {
+    const display = item?.type === 'reasoning' ? displayReasoning.get(item.id) : undefined;
+    const normalized = display ? {
+      ...item,
+      summary: display.summary.length > 0 ? display.summary : item.summary,
+      content: display.content.length > 0 ? display.content : item.content,
+    } : item;
+    return [...(reasoningInsertions.get(index) ?? []), normalized];
+  });
+  items.push(...(reasoningInsertions.get(modelItems.length) ?? []));
   const entries: NonNullable<CodexBridgeEvent['cotEntries']> = [];
-  for (const rawItem of payload.items) {
+  for (const rawItem of items) {
     if (!rawItem || typeof rawItem !== 'object') continue;
     let item = rawItem;
     if ((rawItem.type === 'function_call_output' || rawItem.type === 'custom_tool_call_output')
@@ -412,10 +494,10 @@ function traexHistoryCotEntries(payload: any): CodexBridgeEvent['cotEntries'] {
   return entries;
 }
 
-function traexPendingAgentState(path: string): TraexPendingAgentMessages {
+function traexPendingAgentTurns(path: string): TraexPendingAgentTurns {
   let state = traexPendingAgentCache.get(path);
   if (!state) {
-    state = {};
+    state = { turns: new Map() };
     traexPendingAgentCache.set(path, state);
     if (traexPendingAgentCache.size > TRAEX_PENDING_AGENT_CACHE_MAX) {
       const oldest = traexPendingAgentCache.keys().next().value;
@@ -423,6 +505,74 @@ function traexPendingAgentState(path: string): TraexPendingAgentMessages {
     }
   }
   return state;
+}
+
+function traexPendingAgentState(path: string, sourceTurnId?: string): TraexPendingAgentMessages {
+  const state = traexPendingAgentTurns(path);
+  const key = sourceTurnId ?? state.activeKey ?? '';
+  let messages = state.turns.get(key);
+  if (!messages) {
+    messages = {};
+    state.turns.set(key, messages);
+    if (state.turns.size > TRAEX_PENDING_AGENT_TURNS_PER_PATH_MAX) {
+      const oldest = state.turns.keys().next().value;
+      if (oldest !== undefined) state.turns.delete(oldest);
+    }
+  }
+  return messages;
+}
+
+function bindTraexPendingAgentTurn(path: string, legacyKey: string | undefined, sourceTurnId: string): void {
+  if (legacyKey !== undefined && legacyKey !== sourceTurnId) {
+    const seen = traexSeenUserTurns.get(path);
+    if (seen?.has(sourceTurnId)) seen.set(sourceTurnId, legacyKey);
+  }
+  const state = traexPendingAgentCache.get(path);
+  if (!state || legacyKey === undefined || legacyKey === sourceTurnId) return;
+  const legacy = state.turns.get(legacyKey);
+  const native = state.turns.get(sourceTurnId);
+  if (legacy) {
+    const merged: TraexPendingAgentMessages = {
+      ...legacy,
+      ...native,
+      agentItems: new Map(),
+    };
+    for (const [key, item] of [...(legacy.agentItems ?? []), ...(native?.agentItems ?? [])]) {
+      rememberTraexAgentItem(merged, { id: key, phase: item.phase }, item.text, item.canonical, key);
+    }
+    state.turns.set(sourceTurnId, merged);
+    state.turns.delete(legacyKey);
+  }
+  if (state.activeKey === legacyKey) state.activeKey = sourceTurnId;
+}
+
+function clearTraexPendingAgentMessages(path: string, sourceTurnId: string, legacyKey?: string): void {
+  const state = traexPendingAgentCache.get(path);
+  if (!state) return;
+  state.turns.delete(sourceTurnId);
+  if (legacyKey !== undefined) state.turns.delete(legacyKey);
+  if (state.activeKey === sourceTurnId || state.activeKey === legacyKey) state.activeKey = undefined;
+  if (state.turns.size === 0) traexPendingAgentCache.delete(path);
+}
+
+function rememberTraexAgentItem(
+  pending: TraexPendingAgentMessages,
+  item: { id?: unknown; phase?: unknown },
+  text: string,
+  canonical: boolean,
+  fallbackId: string,
+): void {
+  const items = pending.agentItems ??= new Map();
+  const key = typeof item.id === 'string' && item.id ? item.id : fallbackId;
+  const existing = items.get(key);
+  const phase = typeof item.phase === 'string' && item.phase ? item.phase : undefined;
+  if (!existing?.canonical || canonical) {
+    items.set(key, { text, phase: phase ?? existing?.phase, canonical: canonical || existing?.canonical === true });
+  }
+  if (items.size > TRAEX_PENDING_AGENT_ITEMS_PER_TURN_MAX) {
+    const oldest = items.keys().next().value;
+    if (oldest !== undefined) items.delete(oldest);
+  }
 }
 
 /** Matches a commentary message that ENDS with a nothing-to-send sentinel
@@ -460,8 +610,12 @@ function recoverTraexEmptyFinal(
   adoptMode: boolean,
 ): string {
   if (pending?.lastFinalAnswer?.trim()) return pending.lastFinalAnswer;
+  const items = Array.from(pending?.agentItems?.values() ?? []).reverse();
+  const finalItem = items.find(item => item.phase === 'final_answer' && item.text.trim());
+  if (finalItem) return finalItem.text;
   const candidates: string[] = [];
-  if (pending?.lastAgentItemText?.trim()) candidates.push(pending.lastAgentItemText);
+  const candidateItem = items.find(item => !item.phase && item.text.trim());
+  if (candidateItem) candidates.push(candidateItem.text);
   if (pending?.lastAgentMessageNoPhase?.trim()) candidates.push(pending.lastAgentMessageNoPhase);
   const answer = candidates.find(candidate => !traexTrailingSentinel(candidate));
   if (answer) return answer;
@@ -469,7 +623,8 @@ function recoverTraexEmptyFinal(
   // No real answer candidate: recognise deliberate silence from whichever
   // tracked message carries the trailing sentinel (explicit commentary-phase
   // first, then the phase-less/item candidates).
-  for (const source of [pending?.lastCommentary ?? '', ...candidates]) {
+  const commentary = items.find(item => item.phase && item.phase !== 'final_answer');
+  for (const source of [pending?.lastCommentary ?? '', commentary?.text ?? '', ...candidates]) {
     const sentinel = traexTrailingSentinel(source);
     if (sentinel) return sentinel;
   }
@@ -487,33 +642,32 @@ function eventTimestampMs(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : Date.now();
 }
 
-function abortErrorCode(reason: unknown): string {
-  const normalized = (typeof reason === 'string' ? reason : 'unknown')
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 64) || 'unknown';
-  return `traex_turn_aborted:${normalized}`;
-}
-
-function runtimeFromTraexEntry(entry: any): TraexRuntimeSnapshot | undefined {
-  if (entry?.type !== 'turn_context') return undefined;
-  const settings = entry?.payload?.collaboration_mode?.settings;
-  const model = entry?.payload?.model ?? settings?.model;
-  const reasoningEffort = entry?.payload?.reasoning_effort
-    ?? entry?.payload?.effort
-    ?? settings?.reasoning_effort;
-  const normalizedModel = typeof model === 'string' && model.trim()
-    ? model.trim()
-    : undefined;
-  const normalizedReasoningEffort = typeof reasoningEffort === 'string' && reasoningEffort.trim()
-    ? reasoningEffort.trim()
-    : undefined;
-  if (!normalizedModel && !normalizedReasoningEffort) return undefined;
-  return {
-    ...(normalizedModel ? { model: normalizedModel } : {}),
-    ...(normalizedReasoningEffort ? { reasoningEffort: normalizedReasoningEffort } : {}),
-  };
+function* completeTraexRolloutRecords(
+  text: string,
+  fromOffset: number,
+  sourceSessionId?: string,
+): Generator<{ entry: any; offset: number; displayIndex?: number }> {
+  for (const { line, lineStart: offset } of iterateJsonlLines(text, fromOffset)) {
+    let entry: any;
+    try { entry = JSON.parse(line); } catch { continue; }
+    const completions = new Set(traexDisplayCompletions(entry?.payload, sourceSessionId));
+    if (entry?.type === 'history_mutation' && completions.size > 0) {
+      for (const [displayIndex, completion] of entry.payload.display_completions.entries()) {
+        if (!completions.has(completion)
+          || !['UserMessage', 'AgentMessage'].includes(completion.item?.type)) continue;
+        yield {
+          entry: {
+            type: 'event_msg',
+            timestamp: entry.timestamp,
+            payload: { ...completion, type: 'item_completed' },
+          },
+          offset,
+          displayIndex,
+        };
+      }
+    }
+    yield { entry, offset };
+  }
 }
 
 /** Incrementally drain complete TRAE rollout lines.
@@ -541,22 +695,11 @@ export function drainTraexRollout(
 ): TraexDrainResult {
   const adoptMode = opts?.adoptMode === true;
   const probe = opts?.probe === true;
-  if (!existsSync(path)) return { events: [], newOffset: 0, pendingTail: '' };
-  let size: number;
-  try { size = statSync(path).size; } catch { return { events: [], newOffset: fromOffset, pendingTail: '' }; }
-  let start = fromOffset;
-  if (size < start) start = 0;
-  if (size === start) return { events: [], newOffset: start, pendingTail: '' };
-
-  const buf = Buffer.alloc(size - start);
-  const fd = openSync(path, 'r');
-  try { readSync(fd, buf, 0, buf.length, start); } finally { closeSync(fd); }
-  const text = buf.toString('utf8');
-  const lastNl = text.lastIndexOf('\n');
-  const completeText = lastNl >= 0 ? text.slice(0, lastNl + 1) : '';
-  const pendingTail = lastNl >= 0 ? text.slice(lastNl + 1) : text;
-  const newOffset = start + Buffer.byteLength(completeText, 'utf8');
-  const sourceSessionId = codexSessionIdFromRolloutPath(path);
+  const step = beginJsonlDrain(path, fromOffset);
+  if (step.kind !== 'read') return { events: [], newOffset: step.newOffset, pendingTail: '' };
+  const start = step.start;
+  const { completeText, pendingTail, newOffset } = step.window;
+  const sourceSessionId = traexSessionIdFromRolloutPath(path);
 
   const events: CodexBridgeEvent[] = [];
   const seenUserTurns = new Set<string>();
@@ -583,6 +726,7 @@ export function drainTraexRollout(
     if (!candidate || !claimUserTurn(turnId)) return false;
     candidate.expected = 'terminal';
     candidate.sourceTurnId = turnId;
+    if (!probe) bindTraexPendingAgentTurn(path, candidate.agentStateKey, turnId);
     events.push({
       ...base, uuid: `${base.uuid}:turn-bind`, kind: 'turn_bind', text: '', sourceTurnId: turnId,
     });
@@ -590,23 +734,16 @@ export function drainTraexRollout(
   };
   let latestModel: string | undefined;
   let latestReasoningEffort: string | undefined;
-  let cursor = start;
-  for (const line of completeText.split('\n')) {
-    if (line.length === 0) {
-      cursor += 1;
-      continue;
-    }
-    const lineStart = cursor;
-    cursor += Buffer.byteLength(line, 'utf8') + 1;
-    let obj: any;
-    try { obj = JSON.parse(line); } catch { continue; }
-    const runtime = runtimeFromTraexEntry(obj);
+  for (const { entry: obj, offset: lineStart, displayIndex } of completeTraexRolloutRecords(
+    completeText, start, sourceSessionId,
+  )) {
+    const runtime = runtimeFromTurnContext(obj);
     latestModel = runtime?.model ?? latestModel;
     latestReasoningEffort = runtime?.reasoningEffort ?? latestReasoningEffort;
     const payload = obj?.payload;
     if (!payload || typeof payload !== 'object') continue;
     const base = {
-      uuid: `${path}:${lineStart}`,
+      uuid: `${path}:${lineStart}${displayIndex !== undefined ? `:display:${displayIndex}` : ''}`,
       timestampMs: eventTimestampMs(obj.timestamp),
       ...(sourceSessionId ? { sourceSessionId } : {}),
     };
@@ -618,7 +755,7 @@ export function drainTraexRollout(
     // those too would duplicate nodes. One mutation can carry parallel calls
     // or results; preserve their item order in one cosmetic event.
     if (!probe && obj.type === 'history_mutation') {
-      const cotEntries = traexHistoryCotEntries(payload);
+      const cotEntries = traexHistoryCotEntries(payload, sourceSessionId);
       if (cotEntries && cotEntries.length > 0) {
         if (sourceTurnId) bindPreservedLegacyPredecessor(sourceTurnId, base);
         events.push({ ...base, kind: 'cot', text: '', cotEntries, ...(sourceTurnId ? { sourceTurnId } : {}) });
@@ -649,11 +786,10 @@ export function drainTraexRollout(
             timestampMs: base.timestampMs,
             expected: 'item',
             eventIndex: events.length - 1,
+            agentStateKey: base.uuid,
           });
         }
-        // New turn: drop any agent_message state an unterminated predecessor
-        // left behind so it can't be attributed to this turn.
-        if (!probe) traexPendingAgentCache.delete(path);
+        if (!probe) traexPendingAgentTurns(path).activeKey = sourceTurnId ?? base.uuid;
       }
       continue;
     }
@@ -690,11 +826,13 @@ export function drainTraexRollout(
             });
           }
           if (expectedMirror?.expected === 'item' && sourceTurnId) {
+            if (!probe) bindTraexPendingAgentTurn(path, expectedMirror.agentStateKey, sourceTurnId);
             pendingUserMirrors.push({
               text: userText,
               timestampMs: base.timestampMs,
               expected: 'terminal',
               sourceTurnId,
+              agentStateKey: sourceTurnId,
             });
           }
           if (!expectedMirror && sourceTurnId) {
@@ -705,9 +843,22 @@ export function drainTraexRollout(
               sourceTurnId,
             });
           }
-          // New turn: drop any agent_message state an unterminated predecessor
-          // left behind so it can't be attributed to this turn.
-          if (!probe) traexPendingAgentCache.delete(path);
+          if (!probe && !expectedMirror) {
+            traexPendingAgentTurns(path).activeKey = sourceTurnId ?? base.uuid;
+          }
+        } else if (!probe && sourceTurnId) {
+          const legacyKey = traexSeenUserTurns.get(path)?.get(sourceTurnId);
+          const mirrorIndex = pendingUserMirrors.findIndex(mirror =>
+            legacyKey !== undefined && mirror.agentStateKey === legacyKey && mirror.text === userText);
+          if (mirrorIndex >= 0) {
+            const mirror = pendingUserMirrors.splice(mirrorIndex, 1)[0];
+            bindTraexPendingAgentTurn(path, mirror.agentStateKey, sourceTurnId);
+            pendingUserMirrors.push({
+              ...mirror,
+              expected: 'terminal',
+              sourceTurnId,
+            });
+          }
         }
       } else if (!probe) {
         // Assistant-side mirror of the UserMessage dialect: TraeX 0.201.4+
@@ -717,7 +868,8 @@ export function drainTraexRollout(
         // narration). Tool results and other item types yield no text.
         const agentText = itemCompletedAgentText(payload.item);
         if (agentText) {
-          traexPendingAgentState(path).lastAgentItemText = agentText;
+          const pending = traexPendingAgentState(path, sourceTurnId);
+          rememberTraexAgentItem(pending, payload.item, agentText, displayIndex !== undefined, base.uuid);
         }
       }
       continue;
@@ -735,7 +887,7 @@ export function drainTraexRollout(
       && payload.type === 'agent_message'
       && typeof payload.message === 'string'
       && payload.message.length > 0) {
-      const pending = traexPendingAgentState(path);
+      const pending = traexPendingAgentState(path, sourceTurnId);
       if (payload.phase === 'final_answer') pending.lastFinalAnswer = payload.message;
       else if (typeof payload.phase !== 'string' || payload.phase.length === 0) {
         pending.lastAgentMessageNoPhase = payload.message;
@@ -746,7 +898,18 @@ export function drainTraexRollout(
       && payload.type === 'task_complete'
       && typeof payload.turn_id === 'string'
       && payload.turn_id.length > 0) {
-      const pending = traexPendingAgentCache.get(path);
+      const terminalMirror = takeTraexUserMirrorAtTerminal(
+        pendingUserMirrors,
+        payload.turn_id,
+        seenUserTurns.has(payload.turn_id) || traexSeenUserTurns.get(path)?.has(payload.turn_id) === true,
+        traexSeenUserTurns.get(path)?.get(payload.turn_id),
+      );
+      if (terminalMirror && !terminalMirror.sourceTurnId) {
+        if (!probe) claimTraexUserTurn(path, payload.turn_id, terminalMirror.agentStateKey);
+        seenUserTurns.add(payload.turn_id);
+      }
+      if (!probe) bindTraexPendingAgentTurn(path, terminalMirror?.agentStateKey, payload.turn_id);
+      const pending = traexPendingAgentCache.get(path)?.turns.get(payload.turn_id);
       const failed = payload.error !== null && payload.error !== undefined;
       const rawFinal = typeof payload.last_agent_message === 'string'
         ? payload.last_agent_message
@@ -772,12 +935,7 @@ export function drainTraexRollout(
         //      token would leak the literal into Lark.
         text = recoverTraexEmptyFinal(pending, adoptMode);
       }
-      if (!probe) traexPendingAgentCache.delete(path);
-      const terminalMirror = takeTraexUserMirrorAtTerminal(
-        pendingUserMirrors,
-        payload.turn_id,
-        seenUserTurns.has(payload.turn_id) || traexSeenUserTurns.get(path)?.has(payload.turn_id) === true,
-      );
+      if (!probe) clearTraexPendingAgentMessages(path, payload.turn_id);
       if (terminalMirror?.expected === 'item'
         && !terminalMirror.sourceTurnId
         && terminalMirror.preservedBeforeSuccessor) {
@@ -813,12 +971,19 @@ export function drainTraexRollout(
       && payload.type === 'turn_aborted'
       && typeof payload.turn_id === 'string'
       && payload.turn_id.length > 0) {
-      if (!probe) traexPendingAgentCache.delete(path);
       const terminalMirror = takeTraexUserMirrorAtTerminal(
         pendingUserMirrors,
         payload.turn_id,
         seenUserTurns.has(payload.turn_id) || traexSeenUserTurns.get(path)?.has(payload.turn_id) === true,
+        traexSeenUserTurns.get(path)?.get(payload.turn_id),
       );
+      if (terminalMirror && !terminalMirror.sourceTurnId) {
+        if (!probe) claimTraexUserTurn(path, payload.turn_id, terminalMirror.agentStateKey);
+        seenUserTurns.add(payload.turn_id);
+      }
+      if (!probe) {
+        clearTraexPendingAgentMessages(path, payload.turn_id, terminalMirror?.agentStateKey);
+      }
       if (terminalMirror?.expected === 'item'
         && !terminalMirror.sourceTurnId
         && terminalMirror.preservedBeforeSuccessor) {
@@ -832,7 +997,7 @@ export function drainTraexRollout(
         kind: 'assistant_final',
         text: '',
         terminalStatus: 'ambiguous',
-        terminalErrorCode: abortErrorCode(payload.reason),
+        terminalErrorCode: rolloutAbortErrorCode('traex_turn_aborted', payload.reason),
         ...(sourceTurnId ? { sourceTurnId } : {}),
       });
     }
@@ -860,69 +1025,7 @@ export function drainTraexRollout(
  * trailing partial is excluded via baselineJsonlCursor, so a crash mid-write
  * cannot surface a half-written model — matching drainTraexRollout. */
 export function readLatestTraexRuntime(path: string): TraexRuntimeSnapshot {
-  if (!path || !existsSync(path)) return {};
-  let completeEnd: number;
-  try { completeEnd = baselineJsonlCursor(path).newOffset; } catch { return {}; }
-  if (completeEnd <= 0) return {};
-
-  let latestModel: string | undefined;
-  let latestReasoningEffort: string | undefined;
-  const emit = (): TraexRuntimeSnapshot => ({
-    ...(latestModel ? { model: latestModel } : {}),
-    ...(latestReasoningEffort ? { reasoningEffort: latestReasoningEffort } : {}),
-  });
-  // Backward scan keeps the first (newest) value seen for each field; returns
-  // true once both are known so the scan can stop early.
-  const consider = (line: string): boolean => {
-    if (!line.trim()) return false;
-    let runtime: TraexRuntimeSnapshot | undefined;
-    try { runtime = runtimeFromTraexEntry(JSON.parse(line)); } catch { return false; }
-    if (latestModel === undefined && runtime?.model) latestModel = runtime.model;
-    if (latestReasoningEffort === undefined && runtime?.reasoningEffort) {
-      latestReasoningEffort = runtime.reasoningEffort;
-    }
-    return latestModel !== undefined && latestReasoningEffort !== undefined;
-  };
-
-  const floor = Math.max(0, completeEnd - TRAEX_RUNTIME_SCAN_MAX_BYTES);
-  const chunkBytes = 64 * 1024;
-  let fd: number | undefined;
-  try {
-    fd = openSync(path, 'r');
-    let end = completeEnd;
-    let carry = Buffer.alloc(0);
-    while (end > floor) {
-      const start = Math.max(floor, end - chunkBytes);
-      const chunk = Buffer.alloc(end - start);
-      readSync(fd, chunk, 0, chunk.length, start);
-      const block = carry.length > 0 ? Buffer.concat([chunk, carry]) : chunk;
-      let lineEnd = block.length;
-      if (lineEnd > 0 && block[lineEnd - 1] === 0x0a) lineEnd--;
-      let carryEnd = lineEnd;
-      for (let i = lineEnd - 1; i >= 0; i--) {
-        if (block[i] !== 0x0a) continue;
-        const line = block.subarray(i + 1, lineEnd).toString('utf8');
-        lineEnd = i;
-        carryEnd = i;
-        if (consider(line)) return emit();
-      }
-      // Carry the partial leading fragment back to the previous chunk. The one
-      // exception is the byte-cap floor (floor > 0 && start === floor): there
-      // the leading fragment is a truncated historical partial and is dropped.
-      // At true file start (start === 0) the fragment is the complete first
-      // record and must be considered.
-      carry = start === floor && floor > 0
-        ? Buffer.alloc(0)
-        : block.subarray(0, carryEnd);
-      end = start;
-    }
-    if (carry.length > 0) consider(carry.toString('utf8'));
-  } catch {
-    return emit();
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-  return emit();
+  return readLatestRolloutRuntime(path, TRAEX_RUNTIME_SCAN_MAX_BYTES);
 }
 
 function normaliseInputText(text: string): string {
@@ -1031,7 +1134,7 @@ function matchTraexRolloutPath(target: string): { path: string; cliSessionId: st
     // share the same rollout-*.jsonl filename shape.
     if (!target.includes('/cli/sessions/')) return undefined;
   }
-  const sid = codexSessionIdFromRolloutPath(target);
+  const sid = traexSessionIdFromRolloutPath(target);
   if (!sid) return undefined;
   return { path: target, cliSessionId: sid };
 }
@@ -1151,42 +1254,6 @@ function selectTraexRollout(
   return newest;
 }
 
-/** Enumerate the file paths a pid holds open (Linux /proc, else lsof). Shared
- *  by findTraexRolloutByPid (single) and findTraexRolloutSetByPid (ownership
- *  set) so both derive from one source. Returns undefined when enumeration is
- *  unavailable — callers treat that as "cannot prove ownership". */
-function traexProcessOpenTargets(pid: number): string[] | undefined {
-  if (!Number.isInteger(pid) || pid <= 0) return undefined;
-  if (IS_LINUX) {
-    const fdDir = `/proc/${pid}/fd`;
-    if (!existsSync(fdDir)) return undefined;
-    let entries: string[];
-    try { entries = readdirSync(fdDir); } catch { return undefined; }
-    const targets: string[] = [];
-    for (const fd of entries) {
-      try { targets.push(readlinkSync(join(fdDir, fd))); } catch { continue; }
-    }
-    return targets;
-  }
-  let out: string;
-  try {
-    out = execFileSync('lsof', ['-p', String(pid), '-Fn'], {
-      encoding: 'utf-8',
-      timeout: TRAEX_LSOF_TIMEOUT_MS,
-      killSignal: 'SIGKILL',
-      maxBuffer: 4 * 1024 * 1024,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-  } catch {
-    return undefined;
-  }
-  const targets: string[] = [];
-  for (const line of out.split('\n')) {
-    if (line.startsWith('n/')) targets.push(line.slice(1));
-  }
-  return targets;
-}
-
 /** Find the visible top-level rollout an externally-running TRAE process owns.
  *  TRAE can keep the parent rollout and internal guardian/subagent rollouts open
  *  in the same process. Internal rollouts are never adoptable. When a current
@@ -1196,7 +1263,7 @@ export function findTraexRolloutByPid(
   pid: number,
   preferredSessionId?: string,
 ): { path: string; cliSessionId: string } | undefined {
-  const targets = traexProcessOpenTargets(pid);
+  const targets = listProcessOpenFiles(pid);
   if (!targets) return undefined;
   const selected = selectTraexRollout(traexRolloutRefs(targets), preferredSessionId);
   return selected ? { path: selected.path, cliSessionId: selected.cliSessionId } : undefined;
@@ -1210,7 +1277,7 @@ export function findTraexRolloutByPid(
  *  as "cannot prove ownership" — fail closed, do not bind). Mirrors
  *  findCodexRolloutSetByPid. */
 export function findTraexRolloutSetByPid(pid: number): Set<string> | undefined {
-  const targets = traexProcessOpenTargets(pid);
+  const targets = listProcessOpenFiles(pid);
   if (!targets) return undefined;
   const set = new Set<string>();
   for (const ref of selectableTraexRollouts(traexRolloutRefs(targets))) {
@@ -1225,15 +1292,16 @@ export function findTraexRolloutSetByPid(pid: number): Set<string> | undefined {
  *  FAIL CLOSED — a missing set or a non-member id returns false so the caller
  *  never binds the bridge (or persists a resume id) it can't prove the pid owns.
  *  Extracted so the exact predicate the worker's persist/attach gates use is
- *  unit-testable without a live pid. Mirrors codexHistorySidIsOwned. */
+ *  unit-testable without a live pid. Byte-for-byte the same predicate as
+ *  codexHistorySidIsOwned, so it delegates. A call-time wrapper rather than a
+ *  `const` alias: reading the import at module load makes this module fail to
+ *  load under any partial mock of codex-transcript. */
 export function traexHistorySidIsOwned(
   cliSessionId: string,
   ownedRollouts: Set<string> | undefined,
 ): boolean {
-  if (!ownedRollouts) return false;
-  return ownedRollouts.has(cliSessionId.toLowerCase());
+  return codexHistorySidIsOwned(cliSessionId, ownedRollouts);
 }
-
 
 function readTraexDirectory(path: string): Dirent[] {
   try {
@@ -1246,9 +1314,7 @@ function readTraexDirectory(path: string): Dirent[] {
 function isCanonicalTraexRolloutPath(
   path: string,
   sessionsRoot: string,
-  suffix: string,
 ): boolean {
-  if (!path.endsWith(suffix)) return false;
   const rel = relative(sessionsRoot, path);
   if (!rel || isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`)) return false;
   const parts = rel.split(sep);
@@ -1262,13 +1328,14 @@ function isCanonicalTraexRolloutPath(
 function findIndexedTraexRollout(
   cliSessionId: string,
   sessionsRoot: string,
-  suffix: string,
 ): string | undefined {
   const rows = withTraeDb((db) => db.prepare(
     'SELECT rollout_path AS rolloutPath FROM threads WHERE id = ? LIMIT 1',
   ).all(cliSessionId) as { rolloutPath?: string }[]) ?? [];
   const path = rows[0]?.rolloutPath;
-  if (typeof path !== 'string' || !isCanonicalTraexRolloutPath(path, sessionsRoot, suffix)) {
+  if (typeof path !== 'string'
+    || !isCanonicalTraexRolloutPath(path, sessionsRoot)
+    || traexSessionIdFromRolloutPath(path)?.toLowerCase() !== cliSessionId.toLowerCase()) {
     return undefined;
   }
   try {
@@ -1278,7 +1345,7 @@ function findIndexedTraexRollout(
   }
 }
 
-function findTraexRolloutInDateTree(sessionsRoot: string, suffix: string): string | undefined {
+function findTraexRolloutInDateTree(sessionsRoot: string, cliSessionId: string): string | undefined {
   const years = readTraexDirectory(sessionsRoot)
     .filter((entry) => entry.isDirectory() && TRAEX_YEAR_DIR_RE.test(entry.name))
     .sort((a, b) => b.name.localeCompare(a.name));
@@ -1295,9 +1362,12 @@ function findTraexRolloutInDateTree(sessionsRoot: string, suffix: string): strin
       for (const day of days) {
         const dayPath = join(monthPath, day.name);
         const rollout = readTraexDirectory(dayPath)
-          .find((entry) => entry.isFile()
-            && entry.name.startsWith('rollout-')
-            && entry.name.endsWith(suffix));
+          .filter((entry) => entry.isFile() && entry.name.startsWith('rollout-'))
+          // ISO timestamps are embedded in the filename, so descending name
+          // order selects the newest resume segment within one day.
+          .sort((a, b) => b.name.localeCompare(a.name))
+          .find((entry) => traexSessionIdFromRolloutPath(entry.name)?.toLowerCase()
+            === cliSessionId.toLowerCase());
         if (rollout) return join(dayPath, rollout.name);
       }
     }
@@ -1326,7 +1396,9 @@ function recordTraexRolloutLookupMiss(key: string, nowMs: number): void {
  *
  * TRAE's `threads` table is the authoritative session→path index. Older TRAE
  * versions may not expose `rollout_path`, so lookup degrades to the documented
- * `sessions/YYYY/MM/DD/rollout-<ts>-<sid>.jsonl` tree. The fallback never
+ * `sessions/YYYY/MM/DD/rollout-<ts>-<sid>.jsonl` tree. Newer releases may
+ * append `_<first-turn-id>` after the stable sid for a resumed segment. The
+ * fallback never
  * descends into rollout sidecars (`*.artifacts`, `tool-results`,
  * `rollout-blobs`), whose contents cannot be top-level sessions and may span
  * gigabytes. Repeated fallback misses are backed off, while the cheap indexed
@@ -1334,10 +1406,9 @@ function recordTraexRolloutLookupMiss(key: string, nowMs: number): void {
 export function findTraexRolloutBySessionId(cliSessionId: string): string | undefined {
   if (!cliSessionId) return undefined;
   const sessionsRoot = traeSessionsRoot();
-  const suffix = `-${cliSessionId}.jsonl`;
   const missKey = `${sessionsRoot}\0${cliSessionId.toLowerCase()}`;
 
-  const indexed = findIndexedTraexRollout(cliSessionId, sessionsRoot, suffix);
+  const indexed = findIndexedTraexRollout(cliSessionId, sessionsRoot);
   if (indexed) {
     traexRolloutLookupMisses.delete(missKey);
     return indexed;
@@ -1348,7 +1419,7 @@ export function findTraexRolloutBySessionId(cliSessionId: string): string | unde
   const miss = traexRolloutLookupMisses.get(missKey);
   if (miss && nowMs < miss.nextFilesystemScanAtMs) return undefined;
 
-  const scanned = findTraexRolloutInDateTree(sessionsRoot, suffix);
+  const scanned = findTraexRolloutInDateTree(sessionsRoot, cliSessionId);
   if (scanned) {
     traexRolloutLookupMisses.delete(missKey);
     return scanned;

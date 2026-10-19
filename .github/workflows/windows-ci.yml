@@ -38,7 +38,7 @@ jobs:
           node-version: 22
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.3
       - run: bun install --frozen-lockfile
       - run: bun run build
       - name: Verify native Windows CLI entry
@@ -54,6 +54,8 @@ jobs:
         run: bun run test -- test/windows-supervisor-control.test.ts test/fleet-supervisor.integration.test.ts test/index-supervisor-env-boundary.test.ts test/fleet-command-queue.test.ts test/fleet-runtime.test.ts test/fleet-runtime-spawn-env.test.ts test/fleet-process-identity.test.ts --maxWorkers=2
       - name: Verify Codex title helper process lifecycle
         run: bun run test -- test/codex-app-threads.test.ts
+      - name: Verify Codex model capabilities and runner message boundaries
+        run: bun run test -- test/codex-service-tier-catalog.test.ts test/codex-service-tier.test.ts test/model-catalog-json.test.ts test/jsonrpc-stdio.test.ts test/codex-app-terminal-input.test.ts test/codex-app-terminal-input.integration.test.ts test/codex-app-turn-dispatch.test.ts test/codex-app-runner-protocol.test.ts --maxWorkers=2
       - name: Verify Zellij platform boundaries and existing session behavior
         run: bun run test -- test/windows-zellij.test.ts test/zellij-backend-helpers.test.ts test/zellij-frozen-reattach.test.ts test/zellij-observe-backend.test.ts test/zellij-session-discovery.test.ts
       - name: Verify native process discovery, hooks and session recovery

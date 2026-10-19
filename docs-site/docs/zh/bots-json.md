@@ -60,6 +60,8 @@
 | `envPolicy` | 显式进程继承策略：默认 inherit；strict 只保留运行基线、获准名称和本 bot env（见下文）。 |
 | `env` | 该 bot 的进程环境变量 `{ "KEY": "值" }`，注入到这个 bot 的 CLI 进程。最常见用途：让某个 bot 跑 GLM / 第三方 Anthropic·OpenAI 兼容服务商（见下方示例），也可设 `HTTPS_PROXY` 或 CLI 专属开关。值支持字符串 / 数字 / 布尔；`BOTMUX_` / `LARK_APP_` 等 botmux 保留键会被忽略。按**会话**注入（下个新会话生效），不写入共享 tmux server 全局、不会串到别的 bot。也可在 dashboard「机器人默认设置 → 环境变量」配置 |
 | `quotaFallbackBot` | CLI 额度耗尽后的可选自动交接：`{ "enabled": true, "targetAppId": "cli_...", "kinds"?: ["usage", "rate"], "message"?: "..." }`。默认关闭；可在 Dashboard「Bot 配置 → 高级」编辑。详见下方 |
+| `codexCapacityRecovery` | **默认关闭**。仅对托管 Codex 飞书会话的明确模型容量错误自动续跑，设为 `true` 开启；可用 `/botconfig set codexCapacityRecovery on` / `off` 在线切换。每个任务最多追加两条恢复输入，可能保留在原生模型上下文中，关闭不会删除已有历史；不针对特定 provider，普通限流与额度耗尽不适用。 |
+| `suppressDeliveredFinalFailureNotice` | **实验性、默认关闭**。设为 `true` 后，结构化转写会话（如 Codex）中同一轮、同一次执行尝试已带飞书回执送达显式 final（`botmux send --response-kind final` 或托管 final 卡）时，收尾阶段再遇到模型服务错误（如 527）只记日志与失败终态，不再补发「模型连接失败」通知。该开关信任已送达的 final，不比对模型事后续写的文本；进度 / 补充消息、未带回执或跨轮次的发送不受影响。缺省 / `false` 与此前行为一致。可用 `/botconfig set suppressDeliveredFinalFailureNotice on` / `off` 切换，下个 worker 启动生效 |
 | `codexAppCleanInput` | **实验性**，且仅对 Botmux 托管、实际运行 `codex-app` 的 session 生效。设为 `true` 后，Codex App 的可见 / 持久化文本 `UserMessage` 只保留用户原始输入，消息级 Botmux 上下文主要改走 `additionalContext`；默认关闭，从下一次 turn 派发生效，不改已有历史。详见下方说明 |
 | `codexBrowser` | **实验性、默认关闭**。仅支持 `cliId: "codex-app"`。可在 Dashboard 的“高级 → Codex App”中开关；设为 `true` 后，新会话可通过本机已安装的 Codex Chrome 插件控制 Chrome。对象形式可指定 `{ "enabled": true, "family": "chrome" | "edge", "pluginRoot"?: "/绝对路径" }`，详见下方说明 |
 
@@ -237,7 +239,8 @@ Dashboard 保存后无需重启 daemon。模型、思考强度分别选择“继
 
 | 字段 | 说明 |
 |------|------|
-| `brandLabel` | 卡片底部品牌文案。`undefined`=默认 `botmux` 链接；`""`=隐藏；其它字符串=原样渲染（支持 markdown）。纯样式，不影响路由 / 权限 |
+| `replyCardMode` | `legacy`（默认）分别发送进度与答复；`unified` 将同一轮公开进度、工具记录、执行状态和最终答复更新到同一张卡。支持未启用文件沙盒的 Claude Code / Codex / Grok 普通飞书会话，从下一轮生效。Grok 展示公开旁白和工具事件，不转发原始思考或 hook 内容；其他入口沿用默认路径。独立终端状态卡由 `disableStreamingCard` 单独控制。 |
+| `brandLabel` | 卡片底部品牌文案（仅在最终回答与顶层广播卡片中展示）。`undefined`=默认 `botmux` 链接；`""`=隐藏；其它字符串=原样渲染（支持 markdown）。另受机器级总开关 `dashboard.cardBrandLabel` 约束（Dashboard「设置 → 飞书卡片」，缺省开）：关闭后所有 Bot 一律不显示页脚签名，本字段在 Bot 配置页置灰。纯样式，不影响路由 / 权限 |
 | `showUsageInCardFooter` | 回复卡片页脚是否展示 Agent CLI 原生提供的 Context / Token 用量。缺省 / `true`=展示，`false`=同时隐藏两项；单项数据缺失时仍只省略缺失项。仅控制卡片展示，不停止 Usage Ledger 或其它统计 |
 | `modelBackendVariant` 显示 | 已冻结的 TraeX 后端变体只显示在实时流式 session 卡片的运行时标识中；回复卡片页脚只显示 Context / Token 用量，不展示该变体 |
 | `disableStreamingCard` | `true` 时彻底不发实时流式 session 卡片（web 终端仍跑、最终答复仍经 `botmux send` 到达，只是没有自动刷新的状态卡）。给嫌实时卡吵的用户 |
@@ -336,6 +339,8 @@ Dashboard 的「Bot 配置 → 消息卡片 → 实时卡片按钮」提供同�
 | `senderPolicy.includeSenderOpenIds` / `excludeSenderOpenIds` | 按 `open_id` 精确白名单 / 黑名单 |
 | `senderPolicy.excludeSelf` | 默认 `true`，始终排除当前 Bot 自己发的消息（防自触发） |
 | `messagePolicy.includeMsgTypes` | 监听的消息类型，默认文本 + 富文本（`post`） |
+| `contentPolicy.includeKeywords` / `matchMode` | 可选关键词过滤；`any`（默认）任一命中，`all` 要求全部命中，均为不区分大小写的子串匹配 |
+| `contentPolicy.resolveDocumentTitles` | 默认 `false`。仅在 `text` / `post` 本地文本未命中关键词时，以当前 Bot 的应用身份查询受支持飞书文档的**标题**后再匹配；不读取正文，不回退用户身份，Bot 无文档权限时仍按原消息文本判断 |
 
 ```json
 {
@@ -349,6 +354,10 @@ Dashboard 的「Bot 配置 → 消息卡片 → 实时卡片按钮」提供同�
   }
 }
 ```
+
+文档链接不是独立的飞书消息类型：它通常存在于 `text` 正文或 `post` 富文本链接中。因此 Dashboard 的消息类型仍选择 `text` / `post`，需要按纯链接所指文档标题匹配时，再开启 `resolveDocumentTitles`。目前仅支持经域名与路径校验的 HTTPS `docx` / `wiki` 链接；不支持的链接不会产生网络请求。
+
+开启前，确认 Bot 应用已获得并发布最小读取权限：`drive:drive.metadata:readonly`（读取文档元数据标题）以及 `wiki:node:read`（解析 Wiki 节点；也可使用 `wiki:wiki:readonly`）。权限不足或应用未被授予目标文档访问权时，监听会安全降级为仅按原消息文本判断。
 
 约定与边界（V1）:
 

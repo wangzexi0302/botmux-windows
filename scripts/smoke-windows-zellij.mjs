@@ -35,7 +35,7 @@ const be=new ZellijBackend(${JSON.stringify(name)});
 process.on('message',msg=>{
  try {
   if(msg.type==='start') {be.spawn(process.execPath,[${JSON.stringify(fixture)},${JSON.stringify(arg)}],{cwd:${JSON.stringify(cwd)},cols:120,rows:30,env:{...buildSessionChildEnv(process.env,${strictEnv ? "{mode:'strict'}" : 'undefined'}),BOTMUX_OWNER_OPEN_ID:'test-owner'},strictEnv:${strictEnv},strictEnvReattach:${strictEnv},injectEnv:{BMX_TEST_VALUE:${JSON.stringify(arg + '\nsecond line')},BOTMUX_OWNER_OPEN_ID:'wrong',__OWNER_OPEN_ID:'wrong'}});be.onData(()=>{});be.onExit(()=>{});}
-  if(msg.type==='input') be.write(msg.data);
+  if(msg.type==='input' && !be.write(msg.data)) throw new Error('Zellij client rejected input');
   if(msg.type==='resize') be.resize(msg.cols,msg.rows);
   if(msg.type==='pid') process.send({id:msg.id,pid:be.getChildPid(),reattach:be.isReattach});
   if(msg.type==='detach') {be.kill();process.send({id:msg.id});setTimeout(()=>process.exit(),500);return;}

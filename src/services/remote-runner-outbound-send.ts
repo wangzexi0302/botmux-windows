@@ -74,14 +74,25 @@ export async function sendRemoteRunnerOutboundMessage(
   const directory = mkdtempSync(join(tmpdir(), 'botmux-remote-outbound-'));
   const contentPath = join(directory, 'content.md');
   writeFileSync(contentPath, message.content, { mode: 0o600 });
+  const imagePaths = (message.images ?? []).map((image, index) => {
+    const path = join(directory, `image-${index}-${image.name}`);
+    writeFileSync(path, Buffer.from(image.dataBase64, 'base64'), { mode: 0o600 });
+    return path;
+  });
   const invocation = botmuxCliInvocation(context.cliPath);
+  const mentionArgs = message.mention === 'requester'
+    ? ['--mention-back']
+    : message.mention === 'explicit'
+      ? (message.mentions ?? []).flatMap(target => ['--mention', target])
+      : ['--no-mention'];
   const args = [
     ...invocation.args,
     'send',
     '--remote-runner-outbound',
     '--response-kind', message.responseKind,
-    message.mention === 'requester' ? '--mention-back' : '--no-mention',
+    ...mentionArgs,
     '--content-file', contentPath,
+    ...imagePaths.flatMap(path => ['--images', path]),
     '--session-id', context.sessionId,
   ];
   const env = buildRelayHostEnv(context.env ?? process.env);

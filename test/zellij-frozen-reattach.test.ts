@@ -77,6 +77,16 @@ describe('ZellijBackend frozen reattach decision', () => {
     expect(args).not.toContain('--new-session-with-layout');
   });
 
+  it.skipIf(process.platform !== 'win32')('targets the managed CLI pane before reattached client focus is restored', () => {
+    const be = new ZellijBackend(SESSION, { isReattach: true, reattachDecision: 'frozen' });
+    be.spawn('claude', [], spawnOpts);
+    mockedExecFileSync.mockClear();
+    expect(be.write('A')).toBe(true);
+    expect(mockedExecFileSync).toHaveBeenCalledWith('zellij', [
+      '--session', SESSION, 'action', 'write', '--pane-id', 'terminal_0', '65',
+    ], expect.objectContaining({ windowsHide: true, timeout: 5000 }));
+  });
+
   it('still self-heals in auto mode (default) — a live session flips isReattach true', () => {
     // Default callers (no frozen decision) keep the PR#249 self-heal: a daemon
     // restart that left the CLI running must reattach.

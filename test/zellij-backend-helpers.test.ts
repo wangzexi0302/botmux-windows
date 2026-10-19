@@ -2,6 +2,7 @@ import { afterEach, describe, it, expect } from 'vitest';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { buildWindowsZellijPane } from '../src/utils/windows-zellij.js';
 import {
   tmuxKeyToBytes,
   kdlString,
@@ -18,7 +19,34 @@ import {
 import {
   parseZellijVersion,
   isZellijVersionSupported,
+  zellijEnv,
 } from '../src/setup/ensure-zellij.js';
+
+describe('zellij control namespace', () => {
+  it('keeps daemon and worker clients on the same temp namespace without XDG_RUNTIME_DIR', () => {
+    const daemonEnv = zellijEnv({ HOME: '/home/owner' });
+    const workerEnv = zellijEnv({ HOME: '/home/owner', TMPDIR: '/session/one', TMP: '/session/one', TEMP: '/session/one', ZELLIJ: '1' });
+    expect(workerEnv).toEqual(daemonEnv);
+    expect(workerEnv.TMPDIR).not.toBe('/session/one');
+    expect(workerEnv.ZELLIJ).toBeUndefined();
+  });
+
+  it('preserves XDG runtime and passes session temp only to the CLI pane', () => {
+    const env = { TMPDIR: '/session/two', TMP: '/session/two', TEMP: '/session/two', XDG_RUNTIME_DIR: '/run/user/1000' };
+    expect(zellijEnv(env).XDG_RUNTIME_DIR).toBe('/run/user/1000');
+    expect(zellijEnv(env).TMPDIR).not.toBe(env.TMPDIR);
+    if (process.platform === 'win32') {
+      const pane = buildWindowsZellijPane(process.execPath, [], {
+        cwd: process.cwd(), cols: 80, rows: 24, env: { ...env, PATH: process.env.PATH },
+      }, join(tmpdir(), 'launch.json'));
+      for (const key of ['TMPDIR', 'TMP', 'TEMP']) expect(JSON.parse(pane.bootstrap).env[key]).toBe('/session/two');
+    } else {
+      const layout = buildLayoutString('/bin/echo', [], { cwd: '/work', cols: 80, rows: 24, env });
+      for (const key of ['TMPDIR', 'TMP', 'TEMP']) expect(layout).toContain(`${key}=/session/two`);
+    }
+    expect(env.TMPDIR).toBe('/session/two');
+  });
+});
 
 describe('tmuxKeyToBytes', () => {
   it('maps named keys to terminal byte sequences', () => {

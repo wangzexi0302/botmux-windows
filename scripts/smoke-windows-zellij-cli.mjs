@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import xterm from '@xterm/headless';
 import { ZellijBackend } from '../dist/adapters/backend/zellij-backend.js';
 import { createCliAdapterSync } from '../dist/adapters/cli/registry.js';
+import { resolveExecutableLaunch } from '../dist/utils/pty-launch.js';
 
 if (process.platform !== 'win32') throw new Error('Run on native Windows.');
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -27,7 +28,19 @@ for (const cli of process.argv.includes('--codex-only') ? ['codex'] : ['codex', 
   const opts = { cwd: process.cwd(), cols: 160, rows: 40, env: { ...process.env, TERM: 'xterm-256color' } };
   const args = cli === 'codex' ? ['--no-alt-screen', '-c', 'check_for_update_on_startup=false'] : ['--version'];
   try {
-    backend.spawn(adapter.resolvedBin, args, opts);
+    if (cli === 'claude-code') {
+      // Zellij can close a --version pane before the client renders its output.
+      // Keep the real CLI's inherited stdout visible until fixture cleanup.
+      const launch = resolveExecutableLaunch(adapter.resolvedBin, args, opts.env);
+      backend.spawn(process.execPath, ['-e', `
+const {spawn}=require('node:child_process');
+const child=spawn(${JSON.stringify(launch.bin)},${JSON.stringify(launch.args)},{stdio:'inherit',windowsHide:true});
+child.on('error',error=>{console.error(error);process.exit(1)});
+child.on('exit',code=>{if(code!==0)process.exit(code??1);setTimeout(()=>process.exit(0),60000)});
+`], opts);
+    } else {
+      backend.spawn(adapter.resolvedBin, args, opts);
+    }
     backend.onData(data => { rawOutput += data; terminal.write(data); }); backend.onExit(() => {});
     if (cli === 'claude-code') {
       await until(() => /\d+\.\d+\.\d+.*Claude Code/.test(rawOutput), 'Claude version output missing');

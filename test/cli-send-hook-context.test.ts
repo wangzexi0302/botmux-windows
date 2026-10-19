@@ -1,4 +1,6 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -9,9 +11,19 @@ import { buildRelayHostEnv, startOutboxWatcher } from '../src/adapters/backend/s
 import {
   ensureManagedOriginAttestationDirectory,
   managedOriginCapabilityPath,
+  managedOriginIsolationMarkerPath,
   RELAY_ORIGIN_CAPABILITY_BASENAME,
   replaceManagedOriginCapabilityFile,
 } from '../src/core/managed-origin-capability.js';
+import {
+  MANAGED_ORIGIN_PROOF_DOMAIN,
+  writeManagedOriginAttestationProof,
+} from '../src/core/managed-origin-attestation.js';
+import {
+  acceptVcMeetingDelivery,
+  applyVcMeetingMemberProjection,
+  markVcMeetingDeliveryDispatched,
+} from '../src/services/vc-meeting-delivery-store.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const cliSource = readFileSync(join(__dirname, '..', 'src', 'cli.ts'), 'utf8');
@@ -104,10 +116,11 @@ describe('cmdSend hook context wiring', () => {
     expect(parseAt).toBeGreaterThanOrEqual(0);
     expect(relayAt).toBeGreaterThan(parseAt);
     expect(cmdSend).toContain('let replyLayout = replyLayoutRequest.layout;');
-    expect(cmdSend).toContain('extractFirstReplyCardHeading(text)');
+    expect(cmdSend).toContain('extractFirstReplyCardHeading(cardText)');
     expect(cmdSend).toContain('buildReplyLayoutHeader(replyLayout, layoutBody.heading, replyStyle)');
     expect(cmdSend).toContain('resolveReplyStyle(resolveReplyStyleConfig(s.larkAppId))');
     expect(cmdSend).toContain('createReplyCard([...elements], layoutHeader)');
+    expect(cmdSend).toContain('composeFinalCardSections(canonicalCard');
     expect(cliSource).toContain('--layout result|progress|risk|blocked|handoff');
   });
 
@@ -116,6 +129,50 @@ describe('cmdSend hook context wiring', () => {
     const relayEnd = cliSource.indexOf('\nasync function relayDispatch(', relayStart);
     const relaySend = cliSource.slice(relayStart, relayEnd);
     expect(relaySend).toContain("'--plugin-card-action'");
+  });
+
+  it('finishes a scheduled task only after final delivery and before turn advancement', () => {
+    const relayStart = cliSource.indexOf('async function relaySend(');
+    const relayEnd = cliSource.indexOf('\nasync function relayDispatch(', relayStart);
+    const relaySend = cliSource.slice(relayStart, relayEnd);
+    const sendStart = cliSource.indexOf('async function cmdSend(');
+    const sendEnd = cliSource.indexOf('\n// ─── Card subcommand', sendStart);
+    const cmdSend = cliSource.slice(sendStart, sendEnd);
+
+    expect(cliSource).toContain('--schedule-remove-self');
+    expect(relaySend).toContain("'--schedule-remove-self'");
+    expect(cmdSend).toContain("responseKind !== 'final'");
+    expect(cmdSend).toContain('planScheduleFinalCleanup({');
+    expect(cmdSend).toContain("action: 'remove', id: scheduleRemoveSelfTaskId");
+    expect(cmdSend).toContain('while (!scheduleRemoveSelfRequested');
+    expect(cmdSend).toContain("...(isSlashSend ? ['--slash'] : [])");
+    expect(cmdSend).toContain('scheduleSelfCleanup?.removed === true');
+    expect(cmdSend).toContain('--schedule-remove-self 只支持当前会话内的标准 final 卡，不支持文档评论回复');
+    const primarySend = cmdSend.indexOf('messageId = await dispatchPrimary');
+    const cleanup = cmdSend.indexOf('await removeScheduleSelfAfterFinal();', primarySend);
+    const advance = cmdSend.indexOf('advanceAncestorSessionTurn(', cleanup);
+    expect(primarySend).toBeGreaterThanOrEqual(0);
+    expect(cleanup).toBeGreaterThan(primarySend);
+    expect(advance).toBeGreaterThan(cleanup);
+  });
+
+  it('keeps completion proposals on the canonical final-card and sandbox outbox paths', () => {
+    const relayStart = cliSource.indexOf('async function relaySend(');
+    const relayEnd = cliSource.indexOf('\nasync function relayDispatch(', relayStart);
+    const relaySend = cliSource.slice(relayStart, relayEnd);
+    const sendStart = cliSource.indexOf('async function cmdSend(');
+    const sendEnd = cliSource.indexOf('\n// ─── Card subcommand', sendStart);
+    const cmdSend = cliSource.slice(sendStart, sendEnd);
+
+    expect(cliSource).toContain('--completion-proposal-file <path>');
+    expect(relaySend).toContain('completionProposalFile: completionProposalBase');
+    expect(cmdSend).toContain('normalizeCompletionProposalInput(raw)');
+    expect(cmdSend).toContain('participant.isBot === false');
+    expect(cmdSend).toContain("isSuspendableBackendType(s.backendType)");
+    expect(cmdSend).toContain('不能超过 8 KiB');
+    expect(cmdSend).toContain('completionProposalStore.bindMessage(');
+    expect(cmdSend).toContain('completionProposalCardDispatchUuid(completionProposalRecord)');
+    expect(cmdSend).toContain('buildCompletionProposalElement(completionProposalRecord)');
   });
 
   it('strips trailing memory citations before relay and direct-send rendering', () => {
@@ -486,6 +543,181 @@ describe('cmdSend hook context wiring', () => {
     }
   });
 
+  // A Seatbelt profile can let existsSync() see the PID marker while denying
+  // the read (EPERM); the marker reader reports that as sessionId ''. Real
+  // Seatbelt denial cannot be reproduced here, so chmod 000 stands in for it
+  // (meaningless as root, hence the skip and the explicit precondition).
+  async function withUnreadableMarker(
+    options: { attestable: boolean; dispatchAttempt?: number },
+    run: (env: NodeJS.ProcessEnv) => Promise<void>,
+  ): Promise<void> {
+    const root = mkdtempSync(join(tmpdir(), 'botmux-send-unreadable-marker-'));
+    const dataDir = join(root, 'data');
+    const markerDir = join(dataDir, '.botmux-cli-pids');
+    const markerPath = join(markerDir, String(process.pid));
+    const channelId = 'ad'.repeat(32);
+    const capability = 'be'.repeat(32);
+    const daemon = createServer((req, res) => {
+      let body = '';
+      req.on('data', chunk => { body += String(chunk); });
+      req.on('end', () => {
+        // Tolerate a loopback port-scanner probe (`GET /` with an empty body):
+        // parsing that as JSON would throw inside an event callback, which is a
+        // hard crash rather than a rejected promise. See helpers/read-request-body.ts.
+        let request: { sessionId: string; channelId: string; originCapability: string; nonce: string };
+        try {
+          request = JSON.parse(body) as typeof request;
+        } catch {
+          res.writeHead(400).end();
+          return;
+        }
+        if (request.sessionId === 'session' && request.channelId === channelId
+          && request.originCapability === capability) {
+          writeManagedOriginAttestationProof({
+            dataDir,
+            proof: {
+              domain: MANAGED_ORIGIN_PROOF_DOMAIN,
+              version: 1,
+              nonce: request.nonce,
+              channelId,
+              sessionId: 'session',
+              turnId: 'turn-live',
+              ...(options.dispatchAttempt !== undefined ? { dispatchAttempt: options.dispatchAttempt } : {}),
+              requiresCodexAppLedger: false,
+              issuedAtMs: Date.now(),
+            },
+          });
+        }
+        res.writeHead(200).end();
+      });
+    });
+    try {
+      mkdirSync(markerDir, { recursive: true });
+      writeFileSync(markerPath, JSON.stringify({ sessionId: 'session', turnId: 'turn-live' }));
+      chmodSync(markerPath, 0o000);
+      expect(() => readFileSync(markerPath, 'utf-8')).toThrow();
+      await new Promise<void>(resolve => daemon.listen(0, '127.0.0.1', resolve));
+      const { port } = daemon.address() as AddressInfo;
+      if (options.attestable) {
+        ensureManagedOriginAttestationDirectory(dataDir, 'session', channelId);
+        // Keep the CLI on the non-isolated classification so the unreadable
+        // marker itself drives attestation; writing the proof re-creates the
+        // read-isolation marker only after classification has finished.
+        rmSync(managedOriginIsolationMarkerPath(dataDir, 'session', channelId));
+        replaceManagedOriginCapabilityFile(
+          managedOriginCapabilityPath(dataDir, 'session', channelId),
+          JSON.stringify({ sessionId: 'session', channelId, capability, ipcPort: port }),
+        );
+      }
+      if (options.dispatchAttempt !== undefined) {
+        // A durable dispatch carries an attempt; the VC managed-output policy
+        // then requires a live receipt whose attempt equals the attested one.
+        const memberKey = { listenerAppId: 'listener', meetingId: 'meeting', memberId: 'member', memberEpoch: 1 };
+        applyVcMeetingMemberProjection(dataDir, {
+          ...memberKey, ownerBootId: 'owner-boot', ownerEpoch: 1, agentAppId: 'app-a',
+          role: 'minutes', membershipGeneration: 1, status: 'active', responseMode: 'listener_thread',
+          capabilities: ['listener.output.request', 'meeting.read'], ownedSinks: [],
+          sinkOwnerGeneration: 1, joinedAtIngestSeq: 0, receiverSessionId: 'session',
+          outputChatId: 'listener-chat', outputPlacement: 'auto',
+        });
+        acceptVcMeetingDelivery(dataDir, {
+          ...memberKey, ownerBootId: 'owner-boot', ownerEpoch: 1, membershipGeneration: 1,
+          deliveryKey: 'turn-live', inputHash: 'input-hash', fromSeq: 1, toSeq: 1,
+          responseMode: 'listener_thread', listenerOutputProtocol: 'plain', receiverBootId: 'receiver-boot',
+        });
+        markVcMeetingDeliveryDispatched(dataDir, { ...memberKey, deliveryKey: 'turn-live' }, {
+          receiverBootId: 'receiver-boot', workerGeneration: 1,
+        });
+      }
+      seedPersistedSessionRows(dataDir, 'app-a', {
+        session: {
+          sessionId: 'session', chatId: 'oc_chat', rootMessageId: 'om_root',
+          title: 'unreadable marker', status: 'active', createdAt: new Date(0).toISOString(),
+          larkAppId: 'app-a', cliId: 'codex-app',
+          codexAppDispatchLedger: options.dispatchAttempt === undefined
+            ? [{
+                dispatchId: 'dispatch-live', turnId: 'turn-live',
+                state: 'prepared', content: 'prompt', deliverySink: 'http_wait',
+              }]
+            // Two attempts of the same turn: only the attested attempt may
+            // select its entry (attempt 1 is the live durable receipt below).
+            : [{
+                dispatchId: 'dispatch-live', turnId: 'turn-live', dispatchAttempt: 1,
+                state: 'prepared', content: 'prompt', deliverySink: 'http_wait',
+              }, {
+                dispatchId: 'dispatch-other', turnId: 'turn-live', dispatchAttempt: 2,
+                state: 'prepared', content: 'prompt', deliverySink: 'lark',
+              }],
+        },
+      });
+      await run({
+        ...process.env,
+        SESSION_DATA_DIR: dataDir,
+        BOTMUX_SESSION_ID: 'session',
+        BOTMUX_ORIGIN_CHANNEL_ID: channelId,
+        BOTMUX_SEND_RELAY: '',
+        BOTMUX_READ_ISOLATED: '',
+        BOTMUX_HOST_RELAY_AUTHORIZED: '',
+        BOTMUX_WORKFLOW: '',
+        BOTMUX_LARK_APP_ID: '', BOTMUX_LARK_APP_SECRET: '',
+        HOME: root,
+      });
+    } finally {
+      await new Promise<void>(resolve => daemon.close(() => resolve()));
+      try { chmodSync(markerPath, 0o600); } catch { /* setup may not have created it */ }
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it.skipIf(process.getuid?.() === 0)(
+    'falls back to the attested managed origin when the live marker exists but is unreadable',
+    async () => {
+      await withUnreadableMarker({ attestable: true }, async env => {
+        const result = await runCli(['send', 'must not send', '--session-id', 'session', '--no-mention'], env);
+        expect(result.code).toBe(2);
+        // Reaching the origin session's durable sink proves the origin resolved
+        // to the attested session rather than the marker's empty string.
+        expect(result.stderr).toContain('origin turn turn-live is bound to the http_wait host sink');
+        expect(result.stderr).not.toContain('Invalid turn-send ledger session id');
+      });
+    },
+  );
+
+  it.skipIf(process.getuid?.() === 0)(
+    'carries the attested dispatch attempt when the live marker is unreadable',
+    async () => {
+      await withUnreadableMarker({ attestable: true, dispatchAttempt: 1 }, async env => {
+        const result = await runCli(['send', 'must not send', '--session-id', 'session', '--no-mention'], env);
+        expect(result.code).toBe(2);
+        // Attempt 1 passes the receipt check and selects its own (http_wait)
+        // ledger entry, not attempt 2's lark entry.
+        expect(result.stderr).toContain('origin turn turn-live is bound to the http_wait host sink');
+      });
+      await withUnreadableMarker({ attestable: true, dispatchAttempt: 2 }, async env => {
+        const result = await runCli(['send', 'must not send', '--session-id', 'session', '--no-mention'], env);
+        expect(result.code).toBe(2);
+        expect(result.stderr).toContain('(origin_mismatch)');
+        expect(result.stderr).not.toContain('bound to the http_wait host sink');
+      });
+    },
+  );
+
+  it.skipIf(process.getuid?.() === 0)(
+    'does not let an unreadable marker fall back to the env session when nothing was attested',
+    async () => {
+      await withUnreadableMarker({ attestable: false }, async env => {
+        const result = await runCli(['send', 'must not send', '--session-id', 'session', '--no-mention'], env);
+        // Adopting the env session would hit its unsettled durable ledger and
+        // refuse; with no trusted origin the send instead proceeds as an
+        // ordinary reply (as before the fix) and stops at the unregistered
+        // fixture bot, before any provider side effect.
+        expect(result.stderr).not.toContain('origin session session has unsettled durable output');
+        expect(result.stderr).not.toContain('Invalid turn-send ledger session id');
+        expect(result.stderr).toContain('Bot not registered: app-a');
+      });
+    },
+  );
+
   it('rejects a trusted host re-exec when its authorized Codex App ledger was already settled', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'botmux-send-host-ledger-gone-'));
     const channelId = 'ef'.repeat(32);
@@ -579,7 +811,7 @@ describe('cmdSend hook context wiring', () => {
       .toBeLessThan(cmdSend.indexOf("const { sendMessage, replyMessage"));
   });
 
-  it('keeps Remote Runner outbound sends host-only, route-frozen, and non-terminal', () => {
+  it('keeps Remote Runner outbound sends host-only, route-frozen, and explicitly terminal-aware', () => {
     const cmdSendStart = cliSource.indexOf('async function cmdSend(');
     const cmdDispatchStart = cliSource.indexOf('async function cmdDispatch(', cmdSendStart);
     const cmdSend = cliSource.slice(cmdSendStart, cmdDispatchStart);
@@ -587,15 +819,20 @@ describe('cmdSend hook context wiring', () => {
     const providerImport = cmdSend.indexOf("const { sendMessage, replyMessage");
     expect(guard).toBeGreaterThan(0);
     expect(guard).toBeLessThan(providerImport);
-    expect(cmdSend.slice(guard, providerImport)).toContain('trustedRelayCtx.sessionId !== sid');
-    expect(cmdSend.slice(guard, providerImport)).toContain("['progress', 'auxiliary']");
-    expect(cmdSend.slice(guard, providerImport)).toContain('sendTopLevel || overrideChatId || sendInto');
-    expect(cmdSend.slice(guard, providerImport)).toContain('mentionArgs.length > 0');
-    expect(cmdSend).toContain('...(remoteRunnerOutbound ? { terminalIndependent: true } : {})');
+    const remoteGuard = cmdSend.slice(guard, cmdSend.indexOf('// A proof is a point-in-time', guard));
+    expect(remoteGuard).toContain('trustedRelayCtx.sessionId !== sid');
+    expect(remoteGuard).toContain("['progress', 'auxiliary', 'final']");
+    expect(remoteGuard).toContain('sendTopLevel || overrideChatId || sendInto');
+    expect(remoteGuard).toContain('Number(mentionArgs.length > 0)');
+    expect(remoteGuard).not.toContain('|| mentionArgs.length > 0');
+    expect(remoteGuard).not.toContain('images.length > 0');
+    expect(remoteGuard).toContain('files.length > 0');
+    expect(cmdSend).toContain("remoteRunnerOutbound && effectiveResponseKind !== 'final'");
+    expect(cmdSend).toContain('? { terminalIndependent: true }');
   });
 
   it.each([
-    ['explicit recipient', ['--no-mention', '--mention', 'ou_forbidden']],
+    ['explicit plus none mention decisions', ['--no-mention', '--mention', 'ou_forbidden']],
     ['two mention decisions', ['--no-mention', '--mention-back']],
   ])('rejects Remote Runner outbound sends with %s through the real CLI', async (_name, mentionArgs) => {
     const root = mkdtempSync(join(tmpdir(), 'botmux-remote-outbound-guard-'));
@@ -628,11 +865,54 @@ describe('cmdSend hook context wiring', () => {
         BOTMUX_LARK_APP_SECRET: '',
       });
       expect(result.code).toBe(2);
-      expect(result.stderr).toContain('supports only current-session Markdown with one none/requester mention decision');
+      expect(result.stderr).toContain('supports only current-session Markdown/images with one none/requester/explicit mention decision');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it.each(['auxiliary', 'final'] as const)(
+    'accepts one explicit Remote Runner recipient for %s before ordinary content validation',
+    async responseKind => {
+      const root = mkdtempSync(join(tmpdir(), 'botmux-remote-outbound-explicit-'));
+      const dataDir = join(root, 'data');
+      writeFileSync(join(root, 'bots.json'), JSON.stringify([{
+        larkAppId: 'app-a', larkAppSecret: 'test', cliId: 'remote-runner',
+      }]));
+      seedPersistedSessionRows(dataDir, 'app-a', {
+        session: {
+          sessionId: 'session', chatId: 'oc_chat', rootMessageId: 'om_root',
+          title: 'remote', status: 'active', createdAt: new Date(0).toISOString(),
+          larkAppId: 'app-a', cliId: 'remote-runner', pid: process.pid,
+        },
+      });
+      try {
+        const missingContent = join(root, 'missing.md');
+        const result = await runCli([
+          'send', '--remote-runner-outbound', '--response-kind', responseKind,
+          '--session-id', 'session', '--mention', 'ou_target:Target',
+          '--content-file', missingContent,
+        ], {
+          ...process.env,
+          HOME: root,
+          SESSION_DATA_DIR: dataDir,
+          BOTS_CONFIG: join(root, 'bots.json'),
+          BOTMUX_SESSION_ID: 'session',
+          BOTMUX_TURN_ID: 'turn-live',
+          BOTMUX_HOST_RELAY_AUTHORIZED: '1',
+          BOTMUX_SEND_RELAY: '',
+          BOTMUX_WORKFLOW: '',
+          BOTMUX_LARK_APP_ID: '',
+          BOTMUX_LARK_APP_SECRET: '',
+        });
+        expect(result.code).toBe(1);
+        expect(result.stderr).toContain(`文件不存在: ${missingContent}`);
+        expect(result.stderr).not.toContain('--remote-runner-outbound supports only');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('validates the exact document text path before reading content or invoking TTS/uploads', () => {
     const cmdSendStart = cliSource.indexOf('async function cmdSend(');
@@ -768,7 +1048,7 @@ describe('cmdSend hook context wiring', () => {
     expect(cmdSend).toContain('containsNativeAtTag: containsLarkAtTag(content)');
     expect(cmdSend).toContain('const managedRenderedPayloadError = managedVcSendPayloadError({');
     expect(cmdSend).toContain('containsNativeAtTag: containsLarkAtTag(text)');
-    expect(cmdSend).toContain('if (!noMention && !isSlashSend && !vcMeetingManagedSendOrigin)');
+    expect(cmdSend).toContain('if (!noMention && !isSlashSend && !customCard && !vcMeetingManagedSendOrigin)');
     expect(cmdSend).toContain('if (!sendTopLevel && !vcMeetingManagedSendOrigin)');
     expect(cmdSend.indexOf('const managedPayloadError = managedVcSendPayloadError({'))
       .toBeLessThan(cmdSend.indexOf("const { sendMessage, replyMessage"));
@@ -822,12 +1102,14 @@ describe('cmdSend hook context wiring', () => {
     expect(primarySend).toBeGreaterThanOrEqual(0);
     // The delivery record is written AFTER the message is actually sent.
     expect(deliveryIndex).toBeGreaterThan(primarySend);
-    expect(cmdSend.slice(cmdSend.lastIndexOf('try {', deliveryIndex), deliveryIndex)).toContain('getSkillFeedbackStore');
+    const storeWrite = cmdSend.indexOf('getSkillFeedbackStore(resolveDataDir())', primarySend);
+    expect(storeWrite).toBeGreaterThan(primarySend);
+    expect(deliveryIndex).toBeGreaterThan(storeWrite);
     // Turn-completion recording is gated on the response KIND, not on the
     // feedback policy — feedback off must still produce a correlatable record.
-    expect(cmdSend).toContain("if (effectiveResponseKind === 'final' && !customCard && !pureFileSend && !pureVideoSend && !vcMeetingManagedSendOrigin && messageId)");
+    expect(cmdSend).toContain("if (effectiveResponseKind === 'final' && !pureFileSend && !pureVideoSend && !vcMeetingManagedSendOrigin && messageId)");
     const oncallIndex = cmdSend.indexOf('recordOncallGroupDelivery(resolveDataDir()');
-    const completionIndex = cmdSend.indexOf("if (effectiveResponseKind === 'final' && !customCard && !pureFileSend && !pureVideoSend && !vcMeetingManagedSendOrigin && messageId)");
+    const completionIndex = cmdSend.indexOf("if (effectiveResponseKind === 'final' && !pureFileSend && !pureVideoSend && !vcMeetingManagedSendOrigin && messageId)");
     expect(oncallIndex).toBeGreaterThan(primarySend);
     expect(oncallIndex).toBeLessThan(completionIndex);
     // The feedback control (policy + card snapshot) rides along only when a
@@ -837,6 +1119,31 @@ describe('cmdSend hook context wiring', () => {
     expect(cmdSend).toContain('...(carriesFeedbackControl ? { policy: feedbackPolicy } : {})');
     expect(cmdSend).toContain('...(carriesFeedbackControl && feedbackBaseCard ? { baseCard: feedbackBaseCard } : {})');
     expect(cmdSend).toContain('buildFeedbackElement(feedbackPolicy)');
+  });
+
+  it('falls back to daemon indexing only when an isolated CLI cannot open the shared feedback store', () => {
+    const cmdSendStart = cliSource.indexOf('async function cmdSend(');
+    const cmdDispatchStart = cliSource.indexOf('async function cmdDispatch(', cmdSendStart);
+    const cmdSend = cliSource.slice(cmdSendStart, cmdDispatchStart);
+    const completionIndex = cmdSend.indexOf("if (effectiveResponseKind === 'final' && !pureFileSend && !pureVideoSend && !vcMeetingManagedSendOrigin && messageId)");
+    expect(completionIndex).toBeGreaterThanOrEqual(0);
+    const block = cmdSend.slice(completionIndex, cmdSend.indexOf('turn delivery indexing failed after delivery', completionIndex));
+    const localWrite = block.indexOf('getSkillFeedbackStore(resolveDataDir())');
+    const fallback = block.indexOf('if (indexError !== undefined) {');
+    // The local write is always tried first; wherever the store is writable
+    // nothing changes and no IPC is made.
+    expect(localWrite).toBeGreaterThan(0);
+    expect(fallback).toBeGreaterThan(localWrite);
+    const relay = block.slice(fallback);
+    // Isolation is decided the same way postSessionCliIpc decides it.
+    expect(relay).toContain('let isolated = !!process.env.BOTMUX_SEND_RELAY;');
+    expect(relay).toContain('try { loadDaemonIpcSecret(); } catch { isolated = true; }');
+    expect(relay).toContain('const deliveryIpcPort = isolated');
+    // Only the delivered message id + text cross: every correlation field is
+    // the daemon's to derive from the live session.
+    expect(relay).toContain("postSessionCliIpc(deliveryIpcPort, sid, 'turn-delivery', { messageId, content: text })");
+    expect(relay).toContain('if (deliveryIpcPort && currentTurnId && targetChatId === s.chatId)');
+    expect(relay).not.toContain('getSkillFeedbackStore');
   });
 
   it('returns after a concurrent final replay before any post-primary side effects', () => {

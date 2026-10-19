@@ -15,7 +15,7 @@ describe('Codex worker structured-bridge wiring', () => {
     const start = workerSource.indexOf('function codexBridgeNotifyCliSessionId');
     const end = workerSource.indexOf('// Already attached — first-attach-wins for most CLIs.', start);
     const notify = workerSource.slice(start, end);
-    const codexStart = notify.indexOf('if (structuredBridgeIsCodex())');
+    const codexStart = notify.indexOf("if (structuredBridgeIs('codex'))");
     const codex = notify.slice(codexStart);
 
     expect(codexStart).toBeGreaterThanOrEqual(0);
@@ -77,7 +77,7 @@ describe('Codex worker structured-bridge wiring', () => {
     // worker ticker routes through it and acts on each action kind.
     const anchor = workerSource.indexOf('Antigravity has no /adopt bridge');
     expect(anchor).toBeGreaterThan(0);
-    const branchIdx = workerSource.lastIndexOf('if (structuredBridgeIsAntigravity()) {', anchor);
+    const branchIdx = workerSource.lastIndexOf("if (structuredBridgeIs('antigravity')) {", anchor);
     const branch = workerSource.slice(branchIdx, branchIdx + 3200);
     expect(branch).toContain('decideAntigravityTickerAction({');
     expect(branch).toContain("action.kind === 'rotate'");
@@ -97,7 +97,7 @@ describe('Codex worker structured-bridge wiring', () => {
     expect(fn).toContain('cliAdapter.busyPattern.test(busyProbeRegion(screen))');
     expect(fn).toContain('cliAdapter.readyPattern.test(stripAnsiScreenText(screen))');
     // …plus the transcript-level pending-task veto.
-    expect(fn).toContain('antigravityBridgeState.hasPendingTask');
+    expect(fn).toContain('antigravityBridgeState().hasPendingTask');
     expect(fn).toContain('codexBridgeIngest({ flushAntigravityTrailingFinal: true })');
     // The flush is driven from the 1s ticker.
     expect(workerSource).toContain('maybeFlushAntigravityTrailingFinalOnQuietTick();');
@@ -107,7 +107,7 @@ describe('Codex worker structured-bridge wiring', () => {
     const fnStart = workerSource.indexOf('function codexBridgeIngest');
     const fnEnd = workerSource.indexOf('function maybeFlushOmpTrailingFinalOnQuietTick', fnStart);
     const fn = workerSource.slice(fnStart, fnEnd);
-    expect(fn).toContain('!structuredBridgeIsAntigravity()');
+    expect(fn).toContain("!structuredBridgeIs('antigravity')");
   });
 
   it('notifies the bridge when the antigravity pid observer resolves a conversation id', () => {
@@ -132,5 +132,22 @@ describe('Codex worker structured-bridge wiring', () => {
     expect(region).toContain("cfg.promptInjection === 'none' && !supportsZeroPromptInjection(cfg.cliId, {");
     expect(region).toContain('sandbox: sandboxMode');
     expect(region).toContain('backendType: effectiveBackendType');
+  });
+
+  it('resolves the real codex leaf under a sandbox launcher process', () => {
+    const start = workerSource.indexOf('function resolveCodexOwnershipPid');
+    expect(start).toBeGreaterThan(0);
+    const body = workerSource.slice(start, workerSource.indexOf('\n}\n', start));
+    expect(body).toContain("findLaunchedCliPid(candidatePid, 'codex'");
+    // A direct native leaf (its own comm already identifies as codex) must
+    // short-circuit BEFORE the descendant scan.
+    expect(body).toContain('codexProcessIsNativeLeaf(candidatePid, filterExecutable)');
+    expect(workerSource).toContain('lastSpawnCodexLauncherActive = codexLauncherActive;');
+    const kicks = workerSource.match(/if \(cfg\.cliId === 'codex' && codexLauncherActive\) startCodexLauncherPidResolve\(/g) ?? [];
+    expect(kicks.length).toBeGreaterThanOrEqual(2);
+    // The retry loop gets the same leaf predicate (no 30× waste on direct
+    // installs) and the configured custom executable name.
+    expect(workerSource).toContain('isDirectLeaf: (lp) => codexProcessIsNativeLeaf(lp, codexFilterExecutable)');
+    expect(workerSource).toContain("findLaunchedCliPid(lp, 'codex', 6, {}, codexFilterExecutable)");
   });
 });

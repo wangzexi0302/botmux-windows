@@ -9,6 +9,7 @@ import { createCliAdapterSync, resolveCommand } from '../src/adapters/cli/regist
 import { detectDefaultBackend } from '../src/config.js';
 import { PtyBackend } from '../src/adapters/backend/pty-backend.js';
 import { isBunRuntime } from './helpers/ts-runner.js';
+import { clearCodexServiceTierCatalogCache } from '../src/services/codex-service-tier-catalog.js';
 
 const roots: string[] = [];
 function temp() {
@@ -75,6 +76,30 @@ describe.skipIf(process.platform !== 'win32')('Windows executable resolution', (
     const launch = resolveExecutableLaunch(shim, args, process.env);
     const output = execFileSync(launch.bin, launch.args, { encoding: 'utf8', windowsHide: true });
     expect(JSON.parse(output)).toEqual(args);
+  });
+
+  it('shares Codex model capabilities from an npm launcher with the app adapter', async () => {
+    const root = temp();
+    const calls = join(root, 'calls.jsonl');
+    writeFileSync(join(root, 'probe.cjs'), `
+const fs = require('node:fs');
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2)) + '\\n');
+console.log(JSON.stringify({ models: [{ slug: 'fixture-model', visibility: 'list', service_tiers: [{ id: 'priority' }] }] }));
+`);
+    const shim = join(root, 'probe.cmd');
+    writeFileSync(shim, '@echo off\r\n"%_prog%" "%dp0%\\probe.cjs" %*\r\n');
+    clearCodexServiceTierCatalogCache();
+    try {
+      const codex = createCliAdapterSync('codex', shim);
+      const app = createCliAdapterSync('codex-app', shim);
+      await expect(codex.detectModelCapabilities!()).resolves.toEqual([
+        { slug: 'fixture-model', serviceTiers: ['priority'] },
+      ]);
+      await expect(app.detectModels!()).resolves.toEqual(['fixture-model']);
+      expect(readFileSync(calls, 'utf8').trim().split('\n').map(line => JSON.parse(line))).toEqual([['debug', 'models']]);
+    } finally {
+      clearCodexServiceTierCatalogCache();
+    }
   });
 });
 

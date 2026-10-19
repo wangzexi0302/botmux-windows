@@ -24,6 +24,7 @@ import { resolveDaemonEnv } from '../cli/daemon-lifecycle-env.js';
 import { scrubDetachedRestartEnvRefresh } from './restart-env-refresh.js';
 import type { RestartEnvFallback } from './restart-env-refresh.js';
 import { stripDashboardH5Env } from '../utils/child-env.js';
+import { scrubSessionTempEnv } from './session-temp.js';
 import { findQuotaFallbackCycles } from '../services/quota-fallback.js';
 import {
   inspectFleetProcess,
@@ -155,6 +156,7 @@ export function resolveFleetDaemonEnv(
   };
   scrubDetachedRestartEnvRefresh(env);
   stripDashboardH5Env(env);
+  scrubSessionTempEnv(env);
   //
   // MIGRATION-CRITICAL: pin SESSION_DATA_DIR for every supervised child. The old
   // pm2 ecosystem injected `SESSION_DATA_DIR: DATA_DIR` into both the bot daemons

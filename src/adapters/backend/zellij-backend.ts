@@ -1,4 +1,4 @@
-import * as pty from 'node-pty';
+import * as pty from '../../utils/pty.js';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -13,6 +13,7 @@ import { resolveBotmuxWrapperBinDir } from '../../core/botmux-wrapper.js';
 import { logger } from '../../utils/logger.js';
 import { buildWindowsZellijPane, findWindowsZellijProcess, writeWindowsZellijInput } from '../../utils/windows-zellij.js';
 import { resolveExecutableLaunch } from '../../utils/pty-launch.js';
+import { PROCESS_TABLE_MAX_BUFFER } from '../../utils/exec-limits.js';
 
 /**
  * ZellijBackend — session backend using zellij for process persistence.
@@ -52,7 +53,6 @@ export class ZellijBackend implements SessionBackend {
    *  teardown gate just removed. 'auto' (default) keeps the self-heal for
    *  callers that did not freeze a decision. */
   private readonly frozenReattach: boolean;
-  private configPath: string | null = null;
   private tmpConfigDir: string | null = null;
   /** Set by kill()/destroySession() so the pty-client exit they cause (an
    *  intentional detach/teardown — the zellij session survives) is NOT
@@ -62,10 +62,6 @@ export class ZellijBackend implements SessionBackend {
    *  so the first getChildPid() may be null; once resolved it's stable for the
    *  session lifetime (single CLI pane → pane exit ends the session). */
   private resolvedCliPid: number | null = null;
-  /** Explicit pane target for adopt mode (e.g. "terminal_2"). When null,
-   *  zellij `action` commands address the focused pane — correct for managed
-   *  mode where the single CLI pane is always focused. */
-  private readonly paneId: string | null;
 
   // PtyHandle fields the worker sets (parallel to TmuxBackend / PtyBackend) so
   // the claude-code adapter can verify submits and follow the session id.
@@ -73,12 +69,11 @@ export class ZellijBackend implements SessionBackend {
   cliPid?: number;
   cliCwd?: string;
 
-  constructor(sessionName: string, opts?: { ownsSession?: boolean; isReattach?: boolean; paneId?: string; reattachDecision?: 'frozen' | 'auto' }) {
+  constructor(sessionName: string, opts?: { ownsSession?: boolean; isReattach?: boolean; reattachDecision?: 'frozen' | 'auto' }) {
     this.sessionName = sessionName;
     this.ownsSession = opts?.ownsSession ?? true;
     this.reattaching = opts?.isReattach ?? false;
     this.frozenReattach = opts?.reattachDecision === 'frozen';
-    this.paneId = opts?.paneId ?? null;
   }
 
   // ─── Static helpers (mirror TmuxBackend) ──────────────────────────────────
@@ -232,7 +227,6 @@ export class ZellijBackend implements SessionBackend {
     );
 
     const { configPath, layoutPath } = this.writeRuntimeFiles(bin, args, opts);
-    this.configPath = configPath;
     const childEnv = zellijEnv(opts.strictEnv ? inheritBotEnv(opts.env, { mode: 'strict' }) : opts.env);
 
     // Fresh: `--new-session-with-layout <file>` FORCES a new named session with
@@ -290,7 +284,10 @@ export class ZellijBackend implements SessionBackend {
 
   write(data: string): boolean {
     if (!this.process) return false;
-    if (process.platform === 'win32') writeWindowsZellijInput(this.sessionName, data, this.paneId);
+    // Managed layouts always create terminal_0. After reattach the client may
+    // not have restored its focus yet; an untargeted action can silently drop
+    // input even though the CLI pane is alive and the command exits zero.
+    if (process.platform === 'win32') writeWindowsZellijInput(this.sessionName, data, 'terminal_0');
     else this.process.write(data);
     return true;
   }
@@ -379,7 +376,6 @@ export class ZellijBackend implements SessionBackend {
     if (this.tmpConfigDir) {
       try { rmSync(this.tmpConfigDir, { recursive: true, force: true }); } catch { /* benign */ }
       this.tmpConfigDir = null;
-      this.configPath = null;
     }
   }
 }
@@ -541,6 +537,7 @@ export function findServerPid(sessionName: string): number | null {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 3000,
+      maxBuffer: PROCESS_TABLE_MAX_BUFFER,
       env: zellijEnv(),
     });
     servers = parseZellijServerProcs(out);
@@ -599,6 +596,7 @@ export function findPaneCliPid(sessionName: string, _binBasename: string): numbe
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 3000,
+      maxBuffer: PROCESS_TABLE_MAX_BUFFER,
       env: zellijEnv(),
     });
     const children: number[] = [];

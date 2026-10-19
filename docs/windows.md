@@ -24,6 +24,47 @@ Windows 单文件发行包和 Electron 安装包均不在本阶段支持范围�
 原生 tmux 移植版需要另行验证 botmux 的 control-mode / pipe-pane / reattach 行为；
 需要上游现有完整运行环境时使用 WSL2。
 
+## 2026-10-20 上游合并与兼容验证
+
+合入上游 `1648f8ee0`（2026-10-20），共 336 个新提交，并保留 Windows 分支
+`2bc5fd65a` 的终端控制输入隔离和回复消息匹配修复。上游的会话、工作进程、CLI、
+Dashboard 和配置更新均纳入本次合并；Windows 的默认 PTY、npm 启动器解析、
+Unicode 输入、进程身份校验、原生 Zellij 及 Node IPC 启停继续保留。
+
+Codex 模型枚举改用上游的共享能力目录和缓存，同时在共享探测层保留 Windows
+`.cmd` 启动器解析。标题辅助进程接入共享 JSON-RPC 实现，继续等待 Windows 子进程
+关闭后再清理目录，新归档 RPC 同样使用这一退出流程。Zellij 控制命令固定使用
+进程启动时的临时目录，并按大小写不敏感规则清理 Windows 环境变量。
+
+真实 Zellij 验证发现重连期间未指定 pane 的写入可能成功返回却丢失输入；Windows
+托管会话现在明确写入单 pane 布局的 `terminal_0`，接管会话仍使用其经校验的 pane ID。
+POSIX 输入路径保持上游实现。新增回归测试验证重连后的定向写入；CLI smoke 保留
+短命 Claude 版本命令的 pane，避免输出尚未渲染就随 pane 退出而消失。
+
+本机使用 Node 24.16.0、与上游一致的 Bun 1.4.3 和 node-pty 1.2.0-beta.15。
+完整构建及 Windows CI 兼容列表的 52 个测试文件通过，**1,471 项通过、19 项平台限定跳过**；
+上游同步的 6 项独立 Git 测试通过。新增模型能力、JSON-RPC 和终端消息边界用例已加入
+Windows/Linux 兼容 CI；修正了上游新增测试中的 POSIX 路径及布局假设，目录链接测试
+在 Windows 使用 junction，需文件符号链接权限的场景由 Linux CI 覆盖。
+
+真实 Codex/Claude 管道及 PTY 版本启动、Codex Unicode 输入框、普通/严格环境 Zellij
+生命周期与同 PID 重连、多 pane 接管及定向输入均通过；另验证了 Zellij 中的 Codex
+输入框与同进程重连、Claude 原生启动。以上 smoke 未提交模型请求或飞书消息，
+不代表全部新增上游功能完成真实业务验收；本轮未执行全套上游单测或 Linux 实机验证。
+
+```powershell
+bun install --frozen-lockfile
+bun run build
+# 兼容测试列表见 .github/workflows/windows-ci.yml
+node --test test/sync-upstream.test.mjs
+node scripts/smoke-windows-cli.mjs
+node scripts/smoke-windows-codex-input.mjs
+node scripts/smoke-windows-zellij.mjs
+node scripts/smoke-windows-zellij.mjs --strict
+node scripts/smoke-windows-zellij-adopt.mjs
+node scripts/smoke-windows-zellij-cli.mjs C:\path\codex.cmd C:\path\claude.exe
+```
+
 ## 2026-10-05 上游合并与兼容验证
 
 本轮合入上游 `78289b228d616ce47c1f8dee92640d49971d33d3`（2026-10-04），
@@ -183,7 +224,7 @@ Git for Windows Bash 可直接使用 UTF-8 quoted heredoc/stdin，避免要求 B
 
 ## 本地构建和验证
 
-使用 Bun **1.4.2**（与上游一致）、Node **22.13+**，以及已安装的 Codex 和 Claude Code。
+使用 Bun **1.4.3**（与上游一致）、Node **22.13+**，以及已安装的 Codex 和 Claude Code。
 在普通 checkout 中执行，依赖目录不得链接到其它 checkout：
 
 ```powershell

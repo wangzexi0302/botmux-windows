@@ -30,6 +30,7 @@ import {
   frozenIdleLabel,
 } from '../src/im/lark/card-builder.js';
 import type { RelayPickerEntry } from '../src/im/lark/card-builder.js';
+import type { AdoptableSession } from '../src/core/session-discovery.js';
 import type { ProjectInfo } from '../src/services/project-scanner.js';
 import { LOCAL_CLI_IDS } from '../src/services/local-cli-opener.js';
 import { globalConfigPath, mergeDashboardConfig } from '../src/global-config.js';
@@ -234,6 +235,61 @@ describe('buildAdoptSelectCard (V2 picker)', () => {
     // Escaped form is "!\[x\](…)"; the unescaped "![x](" must NOT survive.
     expect(md).toContain('\\[x\\]');
     expect(md).not.toContain('![x](');
+  });
+
+  const herdrLive = (extra: Partial<AdoptableSession> = {}): AdoptableSession => ({
+    source: 'herdr',
+    herdrSessionName: 'collie',
+    herdrPaneId: 'w3:p1',
+    cliId: 'claude-code',
+    cwd: '/work/demo',
+    paneCols: 200,
+    paneRows: 50,
+    ...extra,
+  });
+
+  it('heads a titled live herdr entry with its escaped title, keeping the path and location lines', () => {
+    const titled = cardTexts(parse(buildAdoptSelectCard(
+      [herdrLive({ title: 'fix *login* _page_ [demo]' })], 'om_root', 'en',
+    )))[0]!.split('\n');
+    const untitled = cardTexts(parse(buildAdoptSelectCard([herdrLive()], 'om_root', 'en')))[0]!.split('\n');
+    expect(titled[0]).toBe('**fix \\*login\\* \\_page\\_ \\[demo\\]**');
+    expect(titled).toContain('Path: `/work/demo`');
+    expect(titled).toContain('Location: `collie:w3:p1`');
+    // Everything below the heading is identical to the untitled entry.
+    expect(titled.slice(1)).toEqual(untitled.slice(1));
+  });
+
+  it('falls back to the cwd basename for a live herdr entry without a title', () => {
+    const texts = cardTexts(parse(buildAdoptSelectCard([herdrLive()], 'om_root', 'en')));
+    expect(texts[0]!.split('\n')[0]).toBe('**demo**');
+  });
+
+  it('matches a titled live entry by a title fragment and still by its directory name', () => {
+    const titled = herdrLive({ title: '修复登录页样式' });
+    const other = herdrLive({ herdrPaneId: 'w3:p2', cwd: '/work/other' });
+    const keysFor = (searchQuery: string) => parse(buildAdoptSelectCard([titled, other], 'om_root', 'en', [], { searchQuery }))
+      .body.elements
+      .filter((e: any) => e.tag === 'interactive_container')
+      .map((e: any) => e.behaviors[0].value.entry_key);
+    expect(keysFor('登录页')).toEqual([adoptLiveKey(titled)]);
+    expect(keysFor('demo')).toEqual([adoptLiveKey(titled)]);
+  });
+
+  it('keeps tmux and zellij live entries titled by directory name', () => {
+    const tmux: AdoptableSession = {
+      source: 'tmux', tmuxTarget: 'dev:0.0', cliPid: 42, cliId: 'codex', cwd: '/work/alpha', paneCols: 80, paneRows: 24,
+    };
+    // A stray `title` on a zellij target must not leak into the heading.
+    const zellij = {
+      zellijSession: 'mywork', zellijPaneId: 'terminal_1', cliPid: 7, cliId: 'codex' as const,
+      cwd: '/work/beta', paneCols: 80, paneRows: 24, title: '修复登录页样式',
+    };
+    const texts = cardTexts(parse(buildAdoptSelectCard([tmux, zellij as any], 'om_root', 'en')));
+    expect(texts).toEqual([
+      ['**alpha**', 'Source: 🟢 Running', 'CLI: Codex', 'Path: `/work/alpha`', 'Location: `dev:0.0`', 'Uptime: unknown'].join('\n'),
+      ['**beta**', 'Source: 🟢 Running', 'CLI: Codex', 'Path: `/work/beta`', 'Location: `mywork/terminal\\_1`', 'Uptime: unknown'].join('\n'),
+    ]);
   });
 });
 
@@ -983,15 +1039,14 @@ describe('buildStreamingCard', () => {
       expect(card.header.title.content).toContain('等待输入');
     });
 
-    it('idle + silentIdle flag renders 「已处理 · 判定无需回复」 instead of 「等待输入」', () => {
+    it('idle + silentIdle flag renders the silent turn terminal receipt', () => {
       const card = parse(buildStreamingCard(
         SID, ROOT, URL, TITLE, '', 'idle', undefined, 'hidden',
         undefined, undefined, false, false, undefined, undefined, undefined, false,
         undefined, undefined, undefined, true,
       ));
       expect(card.header.template).toBe('green');
-      expect(card.header.title.content).toContain('已处理 · 判定无需回复');
-      expect(card.header.title.content).not.toContain('等待输入');
+      expect(card.header.title.content).toContain('✓ 本轮已结束（AI 判断无需回复） · 等待输入');
     });
 
     it('silentIdle flag is inert for non-idle statuses (working keeps its label)', () => {
@@ -1003,27 +1058,25 @@ describe('buildStreamingCard', () => {
       expect(card.header.title.content).toContain('工作中');
     });
 
-    // transcript 模式：最终回复卡已投递 → idle 卡头「已完成」。颜色沿用 idle 的绿色。
-    it("idle + 'completed' label renders 「已完成」 instead of 「等待输入」", () => {
+    // transcript 模式：最终回复卡已投递 → idle 卡头展示本轮终态。颜色沿用 idle 的绿色。
+    it("idle + 'completed' label renders the completed turn terminal receipt", () => {
       const card = parse(buildStreamingCard(
         SID, ROOT, URL, TITLE, '', 'idle', undefined, 'hidden',
         undefined, undefined, false, false, undefined, undefined, undefined, false,
         undefined, undefined, undefined, 'completed',
       ));
       expect(card.header.template).toBe('green');
-      expect(card.header.title.content).toContain('已完成');
-      expect(card.header.title.content).not.toContain('等待输入');
-      expect(card.header.title.content).not.toContain('已处理 · 判定无需回复');
+      expect(card.header.title.content).toContain('✓ 本轮已结束 · 等待输入');
+      expect(card.header.title.content).not.toContain('AI 判断无需回复');
     });
 
-    it("idle + 'completed' label renders 'Completed' in English", () => {
+    it("idle + 'completed' label renders the completed turn terminal receipt in English", () => {
       const card = parse(buildStreamingCard(
         SID, ROOT, URL, TITLE, '', 'idle', undefined, 'hidden',
         undefined, undefined, false, false, 'en', undefined, undefined, false,
         undefined, undefined, undefined, 'completed',
       ));
-      expect(card.header.title.content).toContain('Completed');
-      expect(card.header.title.content).not.toContain('Awaiting input');
+      expect(card.header.title.content).toContain('✓ Turn ended · Awaiting input');
     });
 
     it("idle + 'silent' string label equals the legacy boolean flag", () => {
@@ -1032,7 +1085,7 @@ describe('buildStreamingCard', () => {
         undefined, undefined, false, false, undefined, undefined, undefined, false,
         undefined, undefined, undefined, 'silent',
       ));
-      expect(card.header.title.content).toContain('已处理 · 判定无需回复');
+      expect(card.header.title.content).toContain('✓ 本轮已结束（AI 判断无需回复） · 等待输入');
     });
 
     it("'completed' label is inert for non-idle statuses (working keeps its label)", () => {
@@ -1058,14 +1111,14 @@ describe('buildStreamingCard', () => {
         undefined, undefined, false, false, undefined, undefined, undefined, false,
         undefined, undefined, undefined, frozenIdleLabel({ idleLabel: 'completed' }),
       ));
-      expect(completed.header.title.content).toContain('已完成');
+      expect(completed.header.title.content).toContain('✓ 本轮已结束 · 等待输入');
 
       const legacySilent = parse(buildStreamingCard(
         SID, ROOT, URL, TITLE, '', 'idle', undefined, 'hidden',
         undefined, undefined, false, false, undefined, undefined, undefined, false,
         undefined, undefined, undefined, frozenIdleLabel({ silentIdle: true }),
       ));
-      expect(legacySilent.header.title.content).toContain('已处理 · 判定无需回复');
+      expect(legacySilent.header.title.content).toContain('✓ 本轮已结束（AI 判断无需回复） · 等待输入');
     });
 
     it('renders usage + runtime as one single-line markdown run (tail-joined, no column_set)', () => {
@@ -1091,6 +1144,21 @@ describe('buildStreamingCard', () => {
       expect(line.content.indexOf('Total')).toBeLessThan(line.content.indexOf('GPT-5.6-Sol'));      // Not a two-column layout anymore.
       expect(card.elements.some((element: any) => element.tag === 'column_set'
         && JSON.stringify(element).includes('GPT-5.6-Sol'))).toBe(false);
+    });
+
+    it.each([
+      { model: 'claude-opus-5-5-high' },
+      { model: 'gpt-5.6-sol', reasoningEffort: 'high' },
+    ])('shows runtime identity without native metrics: $model', runtime => {
+      const card = parse(buildStreamingCard(
+        SID, ROOT, URL, TITLE, '', 'idle', 'cursor', 'hidden',
+        undefined, undefined, false, false, 'en', undefined, undefined, false,
+        { context: null, tokens: null, ...runtime },
+      ));
+      const line = card.elements.find((e: any) => e.tag === 'markdown' && e.content.includes(runtime.model));
+      expect(line?.content).toContain(`**${runtime.model}**`);
+      if (runtime.reasoningEffort) expect(line.content).toContain('high');
+      expect(line.content).not.toMatch(/Context|Total|↑|↓|null|undefined/);
     });
 
     it('renders metrics alone (no trailing runtime) when there is no model', () => {
@@ -1323,6 +1391,45 @@ describe('buildStreamingCard', () => {
       const mdElements = card.elements.filter((e: any) => e.tag === 'markdown');
       expect(mdElements).toHaveLength(1);
       expect(mdElements[0].content).toBe('_(等待第一张截图…)_');
+    });
+
+    // Positional helper: buildStreamingCard's 23rd argument is screenshotUnavailable.
+    const withUnavailable = (imageKey: string | undefined, unavailable: boolean, locale: 'zh' | 'en' = 'zh') =>
+      parse(buildStreamingCard(
+        SID, ROOT, URL, TITLE, CONTENT, 'working', 'claude-code', 'screenshot',
+        'nonce_x', imageKey, false, false, locale, undefined, undefined, false,
+        undefined, undefined, undefined, undefined, undefined, [], unavailable,
+      ));
+
+    it('renders an explicit unavailable state instead of waiting when no frame can arrive', () => {
+      const card = withUnavailable(undefined, true);
+      const md = card.elements.filter((e: any) => e.tag === 'markdown');
+      expect(md[0].content).toBe('_(当前没有可用截图，请在会话恢复后刷新。)_');
+      expect(card.elements.some((e: any) => e.tag === 'img')).toBe(false);
+      expect(withUnavailable(undefined, true, 'en').elements.find((e: any) => e.tag === 'markdown').content)
+        .toBe('_(No screenshot is available. Refresh after the session resumes.)_');
+    });
+
+    it('keeps the waiting placeholder when a fresh frame is expected (default)', () => {
+      const card = withUnavailable(undefined, false);
+      expect(card.elements.find((e: any) => e.tag === 'markdown').content).toBe('_(等待第一张截图…)_');
+    });
+
+    it('a cached image always wins over the unavailable flag', () => {
+      const card = withUnavailable('img_cached', true);
+      expect(card.elements[0]).toMatchObject({ tag: 'img', img_key: 'img_cached' });
+      expect(card.elements.some((e: any) => e.tag === 'markdown'
+        && String(e.content).includes('当前没有可用截图'))).toBe(false);
+    });
+
+    it('hidden mode ignores the unavailable flag', () => {
+      const card = parse(buildStreamingCard(
+        SID, ROOT, URL, TITLE, CONTENT, 'working', 'claude-code', 'hidden',
+        'nonce_x', undefined, false, false, 'zh', undefined, undefined, false,
+        undefined, undefined, undefined, undefined, undefined, [], true,
+      ));
+      expect(card.elements.some((e: any) => e.tag === 'markdown'
+        && String(e.content).includes('当前没有可用截图'))).toBe(false);
     });
 
     it('should include hr separator after screenshot output', () => {
