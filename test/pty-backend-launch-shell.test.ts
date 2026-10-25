@@ -35,6 +35,19 @@ function spawnCalls(): Array<{ bin: string; args: string[]; opts: Record<string,
 }
 
 describe('PtyBackend launchShell boundary', () => {
+  it('passes the session env removals and injected overrides to the spawned process', () => {
+    spawnCalls().length = 0;
+    const backend = new PtyBackend();
+    backend.spawn('/bin/sh', [], {
+      cwd: '/tmp', cols: 80, rows: 24,
+      env: { PATH: '/usr/bin:/bin', LEAKED: 'inherited', RESTORED: 'old' },
+      unsetEnv: ['LEAKED', 'RESTORED', 'PATH'],
+      injectEnv: { RESTORED: 'new' },
+    });
+    expect(spawnCalls()).toHaveLength(1);
+    expect(spawnCalls()[0].opts.env).toEqual({ PATH: '/usr/bin:/bin', RESTORED: 'new' });
+  });
+
   it('passes bin/args through and does not wrap in launchShell', () => {
     spawnCalls().length = 0;
     const backend = new PtyBackend();

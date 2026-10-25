@@ -60,6 +60,18 @@ describe.skipIf(process.platform !== 'win32')('Windows Zellij', () => {
     expect(spec.env.__OWNER_OPEN_ID).toBeUndefined();
   });
 
+  it('applies session removals before injection and preserves locked keys regardless of casing', () => {
+    const { dir, shim } = fixture();
+    const spec = JSON.parse(buildWindowsZellijPane(shim, [], { cwd: dir, cols: 100, rows: 30,
+      env: { PATH: process.env.PATH!, Leaked_Token: 'inherited', Restore_Me: 'old', BOTMUX_OWNER_OPEN_ID: 'owner' },
+      unsetEnv: ['leaked_token', 'restore_me', 'path', 'botmux_owner_open_id'],
+      injectEnv: { RESTORE_ME: 'new' } }, join(dir, 'launch.json')).bootstrap);
+    expect(spec.env.LEAKED_TOKEN).toBeUndefined();
+    expect(spec.env.RESTORE_ME).toBe('new');
+    expect(spec.env.PATH).toContain(process.env.PATH!);
+    expect(spec.env.BOTMUX_OWNER_OPEN_ID).toBe('owner');
+  });
+
   it('applies strict injection redaction and Codex instance authority to a native pane', () => {
     const { dir, shim } = fixture();
     const opts = { cwd: dir, cols: 100, rows: 30, strictEnv: true,

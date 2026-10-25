@@ -22,7 +22,7 @@ describe('CodexAppTurnDispatchQueue', () => {
 
   it('attributes queued finals to immutable FIFO heads after later writes change worker globals', () => {
     const queue = new CodexAppTurnDispatchQueue();
-    queue.reserve('turn-1', 4);
+    queue.reserve('turn-1', 4, undefined, false, undefined, undefined, 'enabled');
     queue.reserve('turn-2', 9);
 
     expect(queue.settleFinal({
@@ -32,6 +32,7 @@ describe('CodexAppTurnDispatchQueue', () => {
       ok: true,
       turnId: 'turn-1',
       dispatchAttempt: 4,
+      linkRefMode: 'enabled',
       nativeTurnId: 'native-1',
       remaining: 1,
     });
@@ -40,6 +41,10 @@ describe('CodexAppTurnDispatchQueue', () => {
       turnId: 'turn-2',
       dispatchAttempt: 9,
       remaining: 0,
+    });
+    expect(queue.settleFinal({ turnId: 'turn-2' })).toEqual({
+      ok: false,
+      reason: 'no_pending_turn',
     });
   });
 
@@ -158,5 +163,23 @@ describe('CodexAppTurnDispatchQueue', () => {
     const next = queue.settleFinal({ turnId: 'turn-next' }, false);
     expect((next as any).codexAppSteerable).toBeUndefined();
     expect((next as any).remaining).toBe(0);
+  });
+
+  it('restores each frozen LinkRef mode without borrowing it from a FIFO peer', () => {
+    const queue = new CodexAppTurnDispatchQueue();
+    queue.restore([
+      { dispatchId: 'd-enabled', turnId: 'turn-enabled', linkRefMode: 'enabled' },
+      { dispatchId: 'd-disabled', turnId: 'turn-disabled' },
+    ]);
+
+    const enabled = queue.settleFinal({ turnId: 'turn-enabled' }, false);
+    expect(enabled).toMatchObject({
+      ok: true, turnId: 'turn-enabled', linkRefMode: 'enabled', remaining: 1,
+    });
+    queue.commitExactHead((enabled as any).handle);
+    expect(queue.settleFinal({ turnId: 'turn-disabled' }, false)).toMatchObject({
+      ok: true, turnId: 'turn-disabled', remaining: 0,
+    });
+    expect(queue.settleFinal({ turnId: 'turn-disabled' }, false)).not.toHaveProperty('linkRefMode');
   });
 });

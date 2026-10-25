@@ -9,7 +9,7 @@ import {
 } from './reply-card-footer-signature.js';
 import { hasBotmuxCallbackMarker } from './callback-button-marker.js';
 import { extractFeishuCardMarkdownImageKeys } from './card-markdown-image-references.js';
-import { stripTrailingGroupContextCardPurposeMarker } from './group-context-card.js';
+import { stripTrailingGroupContextCardPurposeMarker, hasTrailingGroupContextMediaPurposeMarker } from './group-context-card.js';
 
 // Event data structure from WSClient im.message.receive_v1
 // sender is at data top-level, NOT inside data.message
@@ -838,6 +838,28 @@ export function stripLeadingMentions(content: string, mentions?: { name: string 
   return s;
 }
 
+/**
+ * Dispatcher 路由侧复刻 daemon **命令车道**对入站消息的渲染：即 daemon 在
+ * `handleNewTopicAdmitted` / `handleThreadReplyAdmitted` 里做斜杠判定前看到的
+ * `parsed.content`（post 标题拼成首行、段落以 `\n` 连接、`at`→`@user_name`
+ * 不带前导空格、`a`→`text(href)`、`code_block`→多行围栏、`img`→`[图片 N]`）。
+ *
+ * 热路径上的 {@link extractMessageTextForRouting}（在 dispatcher 里）只拼 text
+ * 节点、丢弃 title 与附件节点，是给 `/t` 等判定用的轻量窥视，**不能**拿它判内置
+ * 免 @ 命令：两套渲染在带标题富文本、text 与 at 紧贴等形态上会给出不同文本，
+ * 导致「群闸放行、daemon 却不认命令」地误建会话。需要与 daemon 结论对齐的判定
+ * 用本函数取车道文本，再走同一个 {@link stripLeadingMentions } +
+ * `parseSlashCommandInvocation`，两侧同一结论才放行。
+ *
+ * 纯解析：不做资源下载、合并转发展开或语音转写（那些发生在 daemon 更深处；本函数
+ * 的调用方只在轻量窥视已形似单行内置命令时才调用，附件/语音候选在 dispatcher
+ * 更早处已被路由）。
+ */
+export function daemonCommandLanePreview(data: RawEventData): { text: string; mentions: LarkMention[] } {
+  const { parsed } = parseEventMessage(data, createImgNumberer());
+  return { text: parsed.content, mentions: parsed.mentions ?? [] };
+}
+
 function matchesMentionId(m: any, id: string): boolean {
   if (!m || !id) return false;
   const openId = m.openId ?? mentionOpenId(m);
@@ -1381,7 +1403,8 @@ export function extractCardContent(rawContent: string, numberer?: ImgNumberer, m
                 ? stripTrailingGroupContextCardPurposeMarker(node.text)
                 : node.text;
               if (visibleText !== node.text
-                && (paragraphIndex !== lastMeaningfulParagraphIndex || paragraphIndex === 0)) {
+                && (hasTrailingGroupContextMediaPurposeMarker(node.text)
+                  || paragraphIndex !== lastMeaningfulParagraphIndex || paragraphIndex === 0)) {
                 if (visibleText) textNodes.push(visibleText);
                 continue;
               }
@@ -1430,6 +1453,9 @@ export function extractCardContent(rawContent: string, numberer?: ImgNumberer, m
               if (ph) buttons.push(`[输入框: ${ph}]`);
             }
             else if (node.tag === 'select_static' || node.tag === 'multi_select_static' || node.tag === 'overflow') {
+              // botmux's own callback controls (reply-card menu/model picker,
+              // effort/config selects) are pure UI chrome — drop them.
+              if (isBotmuxCallbackButton(node)) continue;
               const ph = typeof node.placeholder === 'string' ? node.placeholder : node.placeholder?.content;
               const opts = Array.isArray(node.options)
                 ? node.options.map((o: any) => (typeof o.text === 'string' ? o.text : o.text?.content)).filter(Boolean)
@@ -1539,11 +1565,6 @@ export function isPlaceholderOnlyText(text: string): boolean {
     .replaceAll(CARD_EMBEDDED_PLACEHOLDER, '')
     .trim();
   return stripped === '';
-}
-
-/** Wrap merged text so extractCardContent returns it verbatim downstream. */
-export function wrapResolvedCardText(text: string): string {
-  return JSON.stringify({ [RESOLVED_TEXT_KEY]: text });
 }
 
 /** Strip inline markup (font/text_tag tags, bold markers) but keep text,
@@ -1730,10 +1751,13 @@ function firstNonEmptyString(...candidates: unknown[]): string | undefined {
  *  in extractElementText.
  *
  *  Primary detection is the egress-stamped ownership marker
- *  (callback-button-marker.ts). This wordlist is the LEGACY fallback for
- *  cards sent by pre-marker builds (chat history is long-lived), covering
- *  every action dispatched by card-handler as of the fix — it is frozen;
- *  new botmux buttons rely on the marker, not on growing this list.
+ *  (callback-button-marker.ts). This wordlist is a defense-in-depth fallback
+ *  for two cases: cards still in chat history that were sent by pre-marker
+ *  builds (history is long-lived), and any delivery path that fails to stamp
+ *  the egress marker. It covers every action dispatched by card-handler; when
+ *  adding a new internal control that can traverse an unstamped path, register
+ *  it here (with a parser test asserting it does not leak), do not rely on the
+ *  marker alone.
  *  Third-party cards' buttons (Argos 确认/创建群组…) stay: they carry no
  *  marker and their `value` never uses botmux's action vocabulary. */
 const BOTMUX_INTERNAL_CARD_ACTIONS: ReadonlySet<string> = new Set([
@@ -1742,9 +1766,10 @@ const BOTMUX_INTERNAL_CARD_ACTIONS: ReadonlySet<string> = new Set([
   'open_local_terminal', 'refresh_screenshot', 'restart', 'resume',
   'retry_last_task', 'takeover', 'term_action', 'toggle_display',
   'toggle_stream', 'tui_keys', 'tui_text_input', 'voice_summary',
+  'reply_card_menu', 'reply_model_pick', 'reply_menu_cancel',
   // pendingRepo gates
   'repo_manual_submit', 'repo_worktree_submit', 'skip_repo',
-  'worktree_toggle_mode',
+  'worktree_toggle_mode', 'repo_rebuild_worktree',
   // config / grant / relay cards
   'config_toggle', 'config_set', 'config_quota', 'config_quota_open',
   'config_quota_save', 'config_text_open', 'config_text_save',
@@ -1866,7 +1891,7 @@ function extractCardHeaderTagTexts(header: unknown): string[] {
  *  table into extra rows. */
 function cardTableCellText(value: unknown): string {
   const text = nestedCardText(value);
-  return (text ?? '')
+  return stripTrailingGroupContextCardPurposeMarker(text ?? '')
     .replace(/\r\n?/g, '\n')
     .replace(/\\/g, '\\\\')
     .replace(/\|/g, '\\|')
@@ -2038,7 +2063,10 @@ function extractElementText(el: any, parts: string[], imgLabel: (key: string) =>
   }
 
   // select / multi-select / overflow — surface placeholder + selectable
-  // options so the choices the card offers aren't lost.
+  // options so the choices the card offers aren't lost. botmux's own callback
+  // controls (reply card menu/model picker, effort/config selects) are dropped.
+  if ((tag === 'select_static' || tag === 'multi_select_static' || tag === 'overflow')
+    && isBotmuxCallbackButton(el)) return;
   if (tag === 'select_static' || tag === 'multi_select_static' || tag === 'overflow') {
     const ph = el.placeholder?.content;
     const opts = Array.isArray(el.options)
@@ -2053,7 +2081,8 @@ function extractElementText(el: any, parts: string[], imgLabel: (key: string) =>
   // alt is often the only machine-readable description of what the image shows.
   if (tag === 'img' || tag === 'image') {
     const k = el.image_key ?? el.img_key;
-    const alt = (typeof el.alt === 'string' ? el.alt : el.alt?.content)?.trim();
+    const rawAlt = typeof el.alt === 'string' ? el.alt : el.alt?.content;
+    const alt = typeof rawAlt === 'string' ? stripTrailingGroupContextCardPurposeMarker(rawAlt).trim() : undefined;
     if (k) parts.push(alt ? withImgAlt(imgLabel(k), alt) : imgLabel(k));
   }
 

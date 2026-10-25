@@ -14,6 +14,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fetchDaemonIpc } from '../core/daemon-ipc-auth.js';
 import { windowsParentPid, windowsProcesses } from '../utils/windows-process.js';
+import { PROCESS_TABLE_MAX_BUFFER } from '../utils/exec-limits.js';
 
 // ── 类型 ───────────────────────────────────────────────────────────────────────
 
@@ -59,6 +60,7 @@ function defaultReadParent(pid: number): number | null {
   try {
     const out = execFileSync('ps', ['-o', 'ppid=', '-p', String(pid)], {
       encoding: 'utf-8',
+      maxBuffer: PROCESS_TABLE_MAX_BUFFER,
     });
     const ppid = parseInt(out.trim(), 10);
     if (Number.isInteger(ppid) && ppid > 0) return ppid;

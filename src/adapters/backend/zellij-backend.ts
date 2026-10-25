@@ -424,7 +424,7 @@ export function buildLayoutString(bin: string, args: string[], opts: SpawnOpts, 
     ].join('\n');
   }
   const shellSpec = opts.strictEnv ? { shell: '/bin/sh', flags: [] } : resolveUserShell(process.env, opts.launchShell);
-  const envAssignments = buildBotmuxEnvAssignments(opts.env, opts.injectEnv);
+  const envAssignments = buildBotmuxEnvAssignments(opts.env, opts.injectEnv, opts.unsetEnv);
   const kind = shellKindForPath(shellSpec.shell);
   const [cmd, ...paneArgs] = opts.strictEnv ? strictPaneCommand(bin, args, opts) : shellCommandArgv(shellSpec, shellWrapperScript(resolveBotmuxWrapperBinDir(opts.env ?? process.env), kind), [
     opts.cwd,

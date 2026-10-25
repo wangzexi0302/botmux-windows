@@ -24,6 +24,31 @@ Windows 单文件发行包和 Electron 安装包均不在本阶段支持范围�
 原生 tmux 移植版需要另行验证 botmux 的 control-mode / pipe-pane / reattach 行为；
 需要上游现有完整运行环境时使用 WSL2。
 
+## 2026-10-25 上游合并与兼容验证
+
+合入上游 `9431cb46c`（2026-10-25），共 216 个新提交。包含执行身份切换、
+重启进程身份核对、Codex 预览等待与 stdin 错误处理、Claude 会话恢复、
+会话环境变量、Dashboard 和飞书卡片等更新，继续保留原生 Windows 适配。
+
+合并时保留 npm 启动器解析、ConPTY Unicode 输入、Windows supervisor IPC 停机、
+Codex 辅助进程退出后再清理目录及 Zellij 定向输入。PTY 与原生 Zellij 都接入
+会话环境变量移除；Windows 按大小写不敏感规则移除变量，并保护 PATH、HOME
+和执行身份字段。共享环境校验在浏览器没有 Node `process` 全局变量时仍可运行。
+测试的 tmux 隔离目录在 Windows 使用系统临时目录，POSIX 继续使用短 `/tmp` 路径。
+
+本机使用 Node 24.16.0、Bun 1.4.3，完整构建通过；Windows CI 兼容列表扩展至
+55 个文件，**1,539 项通过、22 项平台限定跳过**。另通过测试卫生和 Bun 版本检查
+共 34 项测试、上游同步的 6 项独立 Git 测试。Codex 关闭输入端的测试在 Windows
+允许管道未立即报错时通过 RPC 超时退出，并继续断言辅助进程已被回收。
+
+真实 Codex/Claude 管道与 PTY 版本启动、Codex Unicode 输入框、Zellij 普通/严格
+环境生命周期与同 PID 重连、多 pane 接管及定向输入均通过；Zellij 中的真实 Codex
+输入框重连和 Claude 启动也通过。通过 `bun run windows:cli restart` 使用 Windows
+专用 Node 入口重启后，supervisor、bot daemon 和 Dashboard 均在线。
+
+本轮 smoke 未提交模型请求或主动发送飞书消息；未运行完整上游单测或 Linux 实机
+验证，不据此宣称全部新增功能已完成真实飞书业务验收。
+
 ## 2026-10-20 上游合并与兼容验证
 
 合入上游 `1648f8ee0`（2026-10-20），共 336 个新提交，并保留 Windows 分支

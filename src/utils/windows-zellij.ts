@@ -11,6 +11,7 @@ import { resolveBotmuxWrapperBinDir } from '../core/botmux-wrapper.js';
 import type { SpawnOpts } from '../adapters/backend/types.js';
 import { zellijEnv } from '../setup/ensure-zellij.js';
 import { botInjectedEnv } from '../core/env-policy.js';
+import { applySessionEnvUnset } from '../core/session-env.js';
 
 // A pane-local launcher, not a server-global env override. Inline source also
 // works in compiled builds, without referencing a virtual dist/ file. The
@@ -36,9 +37,9 @@ export function buildWindowsZellijPane(bin: string, args: string[], opts: SpawnO
   const env: NodeJS.ProcessEnv = {};
   // Windows env keys are case-insensitive; avoid PATH/Path and owner aliases.
   const injected = opts.strictEnv ? botInjectedEnv(opts.injectEnv, { mode: 'strict' }) : opts.injectEnv ?? {};
-  for (const source of [opts.env, injected]) {
-    for (const [key, value] of Object.entries(source)) env[key.toUpperCase()] = value;
-  }
+  for (const [key, value] of Object.entries(opts.env)) env[key.toUpperCase()] = value;
+  applySessionEnvUnset(env, opts.unsetEnv);
+  for (const [key, value] of Object.entries(injected)) env[key.toUpperCase()] = value;
   applySessionOwnerEnv(env, opts.env.BOTMUX_OWNER_OPEN_ID);
   if (opts.strictEnv) {
     env.TERM ??= 'xterm-256color';

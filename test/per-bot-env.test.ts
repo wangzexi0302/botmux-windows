@@ -1,5 +1,17 @@
-import { describe, it, expect } from 'vitest';
-import { sanitizePerBotEnv, isReservedPerBotEnvKey } from '../src/core/per-bot-env.js';
+import { describe, it, expect, vi } from 'vitest';
+import { sanitizePerBotEnv, isReservedPerBotEnvKey, sessionEnvLock } from '../src/core/per-bot-env.js';
+
+it('validates Dashboard environment fields without a Node process global', () => {
+  let result: unknown;
+  try {
+    vi.stubGlobal('process', undefined);
+    result = {
+      env: sanitizePerBotEnv({ CUSTOM: 'kept', BOTMUX_SESSION_ID: 'forged' }),
+      lock: sessionEnvLock('PATH'),
+    };
+  } finally { vi.unstubAllGlobals(); }
+  expect(result).toEqual({ env: { CUSTOM: 'kept' }, lock: 'no-unset' });
+});
 
 describe('sanitizePerBotEnv()', () => {
   it('keeps valid env keys and stringifies primitive values', () => {
